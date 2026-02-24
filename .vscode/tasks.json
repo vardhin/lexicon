@@ -35,6 +35,13 @@
 			"command": "bash /home/vardhin/Documents/git/lexicon/dev.sh",
 			"isBackground": true,
 			"problemMatcher": []
+		},
+		{
+			"label": "Lexicon Brain",
+			"type": "shell",
+			"command": "cd /home/vardhin/Documents/git/lexicon/lexicon-backend && .venv/bin/uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload",
+			"isBackground": true,
+			"problemMatcher": []
 		}
 	]
 }

@@ -22,11 +22,14 @@
     ws = createWS(handleMessage, function (s) { connected = s; });
     setTimeout(function () { if (inputEl) inputEl.focus(); }, 100);
     window.addEventListener('focus', refocus);
+    window.addEventListener('beforeunload', saveState);
   });
 
   onDestroy(() => {
+    saveState();
     if (ws) ws.close();
     window.removeEventListener('focus', refocus);
+    window.removeEventListener('beforeunload', saveState);
     clearTimeout(feedbackTimer);
   });
 
@@ -34,35 +37,71 @@
     setTimeout(function () { if (inputEl) inputEl.focus(); }, 50);
   }
 
+  // ── save current widget state to backend ──
+  function saveState() {
+    if (!ws || !ws.isOpen()) return;
+    // strip the component reference — only send serializable data
+    var data = widgets.map(function (w) {
+      return { id: w.id, type: w.type, x: w.x, y: w.y, w: w.w, h: w.h, props: w.props };
+    });
+    ws.send({ type: 'save_state', widgets: data });
+  }
+
   // ── websocket message handler (CRUD on render list) ──
   function handleMessage(msg) {
     if (msg.type === 'RENDER_WIDGET') {
-      var comp = registry[msg.widget_type];
-      if (!comp) {
-        showFeedback('Unknown widget: ' + msg.widget_type);
-        return;
+      addWidget(msg);
+      saveState();
+    }
+    else if (msg.type === 'RESTORE_STATE') {
+      // Re-hydrate widgets from saved state
+      var restored = [];
+      var list = msg.widgets || [];
+      for (var i = 0; i < list.length; i++) {
+        var w = list[i];
+        var comp = registry[w.type];
+        if (comp) {
+          restored.push({
+            id: w.id, type: w.type,
+            x: w.x, y: w.y, w: w.w, h: w.h,
+            props: w.props || {},
+            component: comp,
+          });
+        }
       }
-      // Add to render list
-      widgets = widgets.concat([{
-        id:    msg.widget_id,
-        type:  msg.widget_type,
-        x:     msg.x,
-        y:     msg.y,
-        w:     msg.w,
-        h:     msg.h,
-        props: msg.props || {},
-        component: comp,
-      }]);
+      if (restored.length > 0) {
+        widgets = restored;
+      }
     }
     else if (msg.type === 'REMOVE_WIDGET') {
       widgets = widgets.filter(function (w) { return w.id !== msg.widget_id; });
+      saveState();
     }
     else if (msg.type === 'CLEAR_WIDGETS') {
       widgets = [];
+      saveState();
     }
     else if (msg.type === 'FEEDBACK') {
       showFeedback(msg.message);
     }
+  }
+
+  function addWidget(msg) {
+    var comp = registry[msg.widget_type];
+    if (!comp) {
+      showFeedback('Unknown widget: ' + msg.widget_type);
+      return;
+    }
+    widgets = widgets.concat([{
+      id:    msg.widget_id,
+      type:  msg.widget_type,
+      x:     msg.x,
+      y:     msg.y,
+      w:     msg.w,
+      h:     msg.h,
+      props: msg.props || {},
+      component: comp,
+    }]);
   }
 
   function showFeedback(text) {
@@ -75,6 +114,7 @@
   function dismiss(widgetId) {
     widgets = widgets.filter(function (w) { return w.id !== widgetId; });
     if (ws) ws.send({ type: 'dismiss_widget', widget_id: widgetId });
+    saveState();
   }
 
   // ── input handling ──

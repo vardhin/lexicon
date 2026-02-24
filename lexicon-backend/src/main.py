@@ -8,16 +8,20 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.engine import GrammarEngine
 from src.connection_manager import ConnectionManager
+from src.memory import Memory
 
 manager = ConnectionManager()
 engine = GrammarEngine()
+memory = Memory()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🧠 Lexicon Brain starting up...")
+    await memory.connect()
     yield
     print("🧠 Lexicon Brain shutting down...")
+    await memory.close()
     await manager.disconnect_all()
 
 
@@ -45,6 +49,14 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         await ws.send_json({"type": "connected", "connection_id": conn_id})
 
+        # Restore previous UI state
+        saved_widgets = await memory.load_state()
+        if saved_widgets:
+            await ws.send_json({
+                "type": "RESTORE_STATE",
+                "widgets": saved_widgets,
+            })
+
         while True:
             raw = await ws.receive_text()
             try:
@@ -57,8 +69,13 @@ async def websocket_endpoint(ws: WebSocket):
             if msg_type == "query":
                 text = payload.get("text", "").strip()
                 if text:
+                    await memory.log_command(text)
                     for action in engine.process(text):
                         await ws.send_json(action)
+
+            elif msg_type == "save_state":
+                widgets = payload.get("widgets", [])
+                await memory.save_state(widgets)
 
             elif msg_type == "dismiss_widget":
                 await ws.send_json({

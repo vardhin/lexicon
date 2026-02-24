@@ -1,0 +1,15 @@
+# SurrealDB embedded data (runtime-generated)
+infra/data/
+
+# Python
+__pycache__/
+*.py[oc]
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~

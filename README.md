@@ -35,21 +35,25 @@ Lexicon is a multi-layer system:
 | **0** | **The Body** | Tauri + Bun + SvelteKit | Transparent fullscreen window, IPC, WebView rendering |
 | **1** | **The Brain** | Python + FastAPI + uv | Rule-based grammar engine, WebSocket hub, extension loader |
 | **2** | **The Spine** | Redis / ZeroMQ *(planned)* | Pub/Sub event bus between layers |
-| **3** | **The Memory** | SurrealDB *(planned)* | Graph + document storage for context, history, edges |
+| **3** | **The Memory** | SurrealDB (embedded) | Persistent graph + document storage for UI state, command history, context |
 | **4** | **External Sensors** | CLI scripts, daemons *(planned)* | System monitors, ad-hoc data pushers |
 
 ### Data Flow
 
 ```
 User presses Super+`  →  Tauri window appears (Layer 0)
+                      →  Svelte connects to WebSocket
+                      →  Backend sends RESTORE_STATE with saved widgets from SurrealDB (Layer 3)
+                      →  Svelte re-hydrates the render list — widgets reappear instantly
+
 User types "clock"    →  Svelte sends { type: "query", text: "clock" } via WebSocket
-                      →  FastAPI receives it (Layer 1)
+                      →  FastAPI receives it (Layer 1), logs command to Memory
                       →  GrammarEngine runs text through extensions/
                       →  extensions/clock.py match() hits → action() returns:
                            { type: "RENDER_WIDGET", widget_type: "clock", x: 50, y: 50, w: 320, h: 180 }
                       →  Sent back over WebSocket
                       →  +page.svelte handleMessage() looks up registry["clock"]
-                      →  Adds entry to widgets[] render list
+                      →  Adds entry to widgets[] render list, saves state to Memory
                       →  Svelte renders <ClockWidget> at (50, 50) with glass blur frame
 ```
 
@@ -67,11 +71,12 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Svelte frontend (Layer 0)** | ✅ Complete | SPA mode, static adapter, frost-glass overlay, Synapse Bar with command history (↑↓), feedback toasts, connection status dot. |
 | **Widget renderer (Layer 0)** | ✅ Complete | Dynamic render list driven by WebSocket. Widgets positioned absolutely at `(x, y, w, h)` from backend. Glass-blur frames, pop-in animation, per-widget dismiss. |
 | **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` strings → Svelte components. Adding a widget = 1 import + 1 line. |
-| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `FEEDBACK`. |
-| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket endpoint at `/ws`, health check at `/health`, connection manager with broadcast support, CORS enabled. |
+| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `FEEDBACK`, `RESTORE_STATE`. |
+| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket endpoint at `/ws`, health check at `/health`, connection manager with broadcast support, CORS enabled. Sends `RESTORE_STATE` on connect. |
 | **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline, returns action list. Fallback feedback for unknown commands. |
 | **Extension: clock** | ✅ Complete | Matches ~7 natural language patterns ("what's the time", "show clock", etc). Returns `RENDER_WIDGET` with clock type. Frontend renders live-updating `HH:MM:SS` with gradient text. |
 | **Extension: clear** | ✅ Complete | Matches "clear", "dismiss all", "close", etc. Returns `CLEAR_WIDGETS` to wipe the render list. |
+| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists UI state (open widgets) and command history. Auto-restores widgets on reconnect. No external server needed. |
 | **Dev tooling** | ✅ Complete | `dev.sh` — builds Svelte → builds Tauri release binary → starts backend. One command to rebuild everything. |
 
 ### 🔲 Not Yet Implemented
@@ -82,7 +87,6 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Tauri IPC commands** | 0 | Rust ↔ Svelte command layer for triggering system actions (sudo auth, shell exec). Capabilities are configured (`shell.json`) but no custom commands yet. |
 | **CSS Morph / UI Payload push** | 0 | Backend pushing live CSS/theme changes to the overlay. |
 | **Redis / ZeroMQ event bus (Spine)** | 2 | Pub/Sub decoupling between Brain, Sensors, and Body. `infra/` folder exists but is empty. |
-| **SurrealDB (Memory)** | 3 | Graph + document storage for conversation history, context nodes, user preferences. Not started. |
 | **SysMon daemon** | 4 | System resource sensor publishing CPU/RAM/disk/network events to the Spine. |
 | **CLI event scripts** | 4 | Ad-hoc scripts that push events into the bus (e.g., `lexicon push "meeting in 5min"`). |
 | **More extensions** | 1 | Timer, date, weather, note, system monitor widgets — logic existed previously, needs to be re-created as standalone extensions + Svelte widgets. |
@@ -216,6 +220,7 @@ lexicon/
 │   └── src/
 │       ├── main.py                 #   FastAPI app + WebSocket endpoint
 │       ├── engine.py               #   Grammar engine (loads extensions/)
+│       ├── memory.py               #   SurrealDB embedded memory (Layer 3)
 │       └── connection_manager.py   #   WebSocket connection tracking
 ├── lexicon-frontend/               # Layer 0: The Body
 │   ├── package.json                #   Bun/Vite/SvelteKit config
@@ -234,7 +239,8 @@ lexicon/
 │       └── src/
 │           ├── main.rs             #   Rust entry point
 │           └── lib.rs              #   Tauri setup + Hyprland fullscreen hack
-├── infra/                          # (empty) Future: Redis/ZeroMQ/SurrealDB configs
+├── infra/
+│   └── data/                       #   SurrealDB file store (gitignored, auto-created)
 └── architecture/                   # Architecture diagram (Mermaid)
 ```
 
@@ -242,10 +248,10 @@ lexicon/
 
 ## Roadmap
 
+- [x] **SurrealDB Memory** — persist UI state, command history, auto-restore on launch
 - [ ] **More extensions** — timer, date, weather, notes, system monitor
 - [ ] **Widget dragging** — let users reposition widgets on the overlay
 - [ ] **Redis/ZeroMQ Spine** — decouple Brain from Body with pub/sub
-- [ ] **SurrealDB Memory** — persist context, command history, widget state
 - [ ] **Hidden WebViews (Organs)** — scrape WhatsApp/Discord/Gmail via injected JS
 - [ ] **SysMon daemon** — push system metrics as events
 - [ ] **CLI tool** — `lexicon push "reminder text"` from terminal
