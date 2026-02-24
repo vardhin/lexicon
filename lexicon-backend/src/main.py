@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import uuid
@@ -10,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.engine import GrammarEngine
 from src.connection_manager import ConnectionManager
 from src.memory import Memory
+from src.shell import PersistentShell
 
 manager = ConnectionManager()
 engine = GrammarEngine()
@@ -114,8 +116,20 @@ async def websocket_endpoint(ws: WebSocket):
     conn_id = str(uuid.uuid4())[:8]
     await manager.connect(ws, conn_id)
 
+    # Each connection gets its own persistent shell
+    shell = PersistentShell()
+
     try:
         await ws.send_json({"type": "connected", "connection_id": conn_id})
+
+        # Send workspace info
+        workspaces = await memory.list_workspaces()
+        current_ws = await memory.get_current_workspace()
+        await ws.send_json({
+            "type": "WORKSPACE_INFO",
+            "workspaces": workspaces,
+            "current": current_ws,
+        })
 
         # Restore previous UI state
         saved_widgets = await memory.load_state()
@@ -123,6 +137,14 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({
                 "type": "RESTORE_STATE",
                 "widgets": saved_widgets,
+            })
+
+        # Restore shell history
+        shell_sessions = await memory.get_shell_sessions(limit=30)
+        if shell_sessions:
+            await ws.send_json({
+                "type": "RESTORE_SHELL",
+                "sessions": shell_sessions,
             })
 
         while True:
@@ -160,8 +182,111 @@ async def websocket_endpoint(ws: WebSocket):
             elif msg_type == "dismiss_all":
                 await ws.send_json({"type": "CLEAR_WIDGETS"})
 
+            elif msg_type == "shell":
+                cmd = payload.get("cmd", "").strip()
+                shell_id = payload.get("shell_id", str(uuid.uuid4())[:8])
+                if cmd:
+                    await shell.run_command(ws, shell_id, cmd, memory)
+
+            elif msg_type == "shell_kill":
+                await shell.kill_current()
+
+            # ── Workspace operations ──
+
+            elif msg_type == "clear_workspace":
+                await memory.clear_state()
+                await ws.send_json({"type": "CLEAR_WIDGETS"})
+                await ws.send_json({"type": "CLEAR_SHELL"})
+
+            elif msg_type == "list_workspaces":
+                workspaces = await memory.list_workspaces()
+                current_ws = await memory.get_current_workspace()
+                await ws.send_json({
+                    "type": "WORKSPACE_INFO",
+                    "workspaces": workspaces,
+                    "current": current_ws,
+                })
+
+            elif msg_type == "create_workspace":
+                name = payload.get("name", "").strip()
+                if name:
+                    await memory.save_state(
+                        [{"id": w["id"], "type": w["type"], "x": w["x"], "y": w["y"],
+                          "w": w["w"], "h": w["h"], "props": w.get("props", {})}
+                         for w in payload.get("current_widgets", [])]
+                    ) if payload.get("current_widgets") else None
+                    await memory.create_workspace(name)
+                    # Load the new (empty) workspace
+                    await ws.send_json({"type": "CLEAR_WIDGETS"})
+                    await ws.send_json({"type": "CLEAR_SHELL"})
+                    workspaces = await memory.list_workspaces()
+                    await ws.send_json({
+                        "type": "WORKSPACE_INFO",
+                        "workspaces": workspaces,
+                        "current": name,
+                    })
+
+            elif msg_type == "switch_workspace":
+                name = payload.get("name", "").strip()
+                if name:
+                    # Save current workspace state first
+                    if payload.get("current_widgets") is not None:
+                        await memory.save_state(payload["current_widgets"])
+                    await memory.switch_workspace(name)
+                    # Send clear, then restore the new workspace
+                    await ws.send_json({"type": "CLEAR_WIDGETS"})
+                    await ws.send_json({"type": "CLEAR_SHELL"})
+                    saved_widgets = await memory.load_state()
+                    if saved_widgets:
+                        await ws.send_json({
+                            "type": "RESTORE_STATE",
+                            "widgets": saved_widgets,
+                        })
+                    shell_sessions = await memory.get_shell_sessions(limit=30)
+                    if shell_sessions:
+                        await ws.send_json({
+                            "type": "RESTORE_SHELL",
+                            "sessions": shell_sessions,
+                        })
+                    workspaces = await memory.list_workspaces()
+                    await ws.send_json({
+                        "type": "WORKSPACE_INFO",
+                        "workspaces": workspaces,
+                        "current": name,
+                    })
+
+            elif msg_type == "delete_workspace":
+                name = payload.get("name", "").strip()
+                if name and name != "default":
+                    current = await memory.get_current_workspace()
+                    await memory.delete_workspace(name)
+                    if current == name:
+                        # Switched back to default — restore it
+                        await ws.send_json({"type": "CLEAR_WIDGETS"})
+                        await ws.send_json({"type": "CLEAR_SHELL"})
+                        saved_widgets = await memory.load_state()
+                        if saved_widgets:
+                            await ws.send_json({
+                                "type": "RESTORE_STATE",
+                                "widgets": saved_widgets,
+                            })
+                        shell_sessions = await memory.get_shell_sessions(limit=30)
+                        if shell_sessions:
+                            await ws.send_json({
+                                "type": "RESTORE_SHELL",
+                                "sessions": shell_sessions,
+                            })
+                    workspaces = await memory.list_workspaces()
+                    await ws.send_json({
+                        "type": "WORKSPACE_INFO",
+                        "workspaces": workspaces,
+                        "current": await memory.get_current_workspace(),
+                    })
+
     except WebSocketDisconnect:
         manager.disconnect(conn_id)
+        await shell.close()
     except Exception as e:
         print(f"❌ {conn_id}: {e}")
         manager.disconnect(conn_id)
+        await shell.close()

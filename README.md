@@ -69,10 +69,15 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 |-----------|--------|---------|
 | **Tauri shell (Layer 0)** | ✅ Complete | Transparent, borderless, always-on-top, fullscreen via Hyprland IPC. `Super+`` toggle via Hyprland keybind. Builds to release binary (~16MB). |
 | **Svelte frontend (Layer 0)** | ✅ Complete | SPA mode, static adapter, frost-glass overlay, Synapse Bar with command history (↑↓), feedback toasts, connection status dot. |
+| **Paged workspace (Layer 0)** | ✅ Complete | Vertically scrolling canvas divided into pages by thin aesthetic divider lines. Sidebar with page numbers for smooth scroll navigation. Auto-expands pages as content grows. Widgets freely span across dividers. |
 | **Widget renderer (Layer 0)** | ✅ Complete | Dynamic render list driven by WebSocket. Widgets positioned absolutely at `(x, y, w, h)` from backend. Glass-blur frames, pop-in animation, per-widget dismiss. |
 | **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` strings → Svelte components. Adding a widget = 1 import + 1 line. |
-| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `FEEDBACK`, `RESTORE_STATE`. |
-| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, system stats at `/system`. Connection manager with broadcast, CORS enabled. Sends `RESTORE_STATE` on connect. |
+| **Widget dragging (Layer 0)** | ✅ Complete | Pointer-based drag via top handle strip. Accounts for scroll offset in paged canvas. Positions persist to SurrealDB Memory and restore on relaunch. |
+| **Widget resizing (Layer 0)** | ✅ Complete | Corner resize handle (bottom-right) on hover. Min size 160×100. Sizes persist alongside positions. |
+| **Shell mode (Layer 0+1)** | ✅ Complete | Synapse Bar doubles as a **real zsh shell** with your full Arch env. Persistent zsh session per connection — `cd`, `z`, `export` changes stick between commands. TUI programs (`btop`, `vim`, `htop`) detected and rejected with helpful message. Ctrl+C / ^C button to kill running commands. 60s timeout. Prefix `!` or `$`, or type common commands (`ls`, `git`, `cat`, etc.) directly. Output streams line-by-line between green dividers on the canvas, auto-scrolling. Every command + full output + exit code persisted to SurrealDB and restored on reconnect. |
+| **Workspaces (Layer 0+3)** | ✅ Complete | Named workspaces stored in SurrealDB. Click ✦ logo → workspace menu: create, switch, delete workspaces. Each workspace has independent widgets, shell history, and state. 🧹 clear button wipes current workspace canvas + DB. Auto-saves on switch, auto-restores on load. |
+| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `RESTORE_SHELL`, `SHELL_OUTPUT`, `SHELL_DONE`, `WORKSPACE_INFO`. |
+| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, system stats at `/system`. Persistent shell session per connection. Connection manager with broadcast, CORS enabled. Sends `WORKSPACE_INFO` + `RESTORE_STATE` + `RESTORE_SHELL` on connect. Workspace CRUD: `create_workspace`, `switch_workspace`, `delete_workspace`, `clear_workspace`, `list_workspaces`. |
 | **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline, returns action list. Fallback feedback for unknown commands. |
 | **Extension: clock** | ✅ Complete | Matches ~7 natural language patterns ("what's the time", "show clock", etc). Returns `RENDER_WIDGET` with clock type. Frontend renders live-updating `HH:MM:SS` with gradient text. |
 | **Extension: clear** | ✅ Complete | Matches "clear", "dismiss all", "close", etc. Returns `CLEAR_WIDGETS` to wipe the render list. |
@@ -83,8 +88,7 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Extension: sysmon** | ✅ Complete | Live system monitor — "system", "show stats". CPU/RAM/disk bars with live polling from `/system` endpoint (reads `/proc`, zero dependencies). |
 | **Extension: weather** | ✅ Complete | Weather widget (demo mode) — "weather", "forecast". Time-based display placeholder. Ready for real API integration. |
 | **Extension: help** | ✅ Complete | Dynamic help guide — "help", "commands", "?". Auto-collects help metadata from all loaded extensions. Shows icons, descriptions, example commands, and usage tips. |
-| **Widget dragging** | ✅ Complete | Pointer-based drag via top handle strip. Dragged positions persist to SurrealDB Memory and restore on relaunch. |
-| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists UI state (open widgets) and command history. Auto-restores widgets on reconnect. No external server needed. |
+| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists UI state (open widgets), command history, **full shell sessions** (cmd + output + exit code), and **named workspaces**. All data is workspace-scoped. Auto-restores widgets and shell history on reconnect. Output capped at 64KB per session. No external server needed. |
 | **Dev tooling** | ✅ Complete | `dev.sh` — builds Svelte → builds Tauri release binary → starts backend. One command to rebuild everything. |
 
 ### 🔲 Not Yet Implemented
@@ -92,10 +96,8 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | Component | Layer | Notes |
 |-----------|-------|-------|
 | **Hidden WebViews (Organs)** | 0 | WhatsApp, Discord, etc. via injected JS in hidden Tauri WebViews. DOM scraping → events. `src-tauri/injections/` exists but is empty. |
-| **Tauri IPC commands** | 0 | Rust ↔ Svelte command layer for triggering system actions (sudo auth, shell exec). Capabilities are configured (`shell.json`) but no custom commands yet. |
 | **CSS Morph / UI Payload push** | 0 | Backend pushing live CSS/theme changes to the overlay. |
 | **Redis / ZeroMQ event bus (Spine)** | 2 | Pub/Sub decoupling between Brain, Sensors, and Body. `infra/` folder exists but is empty. |
-| **SysMon daemon** | 4 | System resource sensor publishing CPU/RAM/disk/network events to the Spine. |
 | **CLI event scripts** | 4 | Ad-hoc scripts that push events into the bus (e.g., `lexicon push "meeting in 5min"`). |
 
 ---
@@ -270,8 +272,11 @@ lexicon/
 ## Roadmap
 
 - [x] **SurrealDB Memory** — persist UI state, command history, auto-restore on launch
-- [x] **More extensions** — timer, date, weather, notes, calculator, system monitor
+- [x] **More extensions** — timer, date, weather, notes, calculator, system monitor, help
 - [x] **Widget dragging** — pointer-based repositioning with persisted positions
+- [x] **Widget resizing** — corner drag handle, min-size constraints, persisted
+- [x] **Paged workspace** — scrollable multi-page canvas with sidebar navigation and dividers
+- [x] **Shell mode** — execute zsh commands directly in the Synapse Bar, streaming output on canvas
 - [ ] **Redis/ZeroMQ Spine** — decouple Brain from Body with pub/sub
 - [ ] **Hidden WebViews (Organs)** — scrape WhatsApp/Discord/Gmail via injected JS
 - [ ] **SysMon daemon** — push system metrics as events
