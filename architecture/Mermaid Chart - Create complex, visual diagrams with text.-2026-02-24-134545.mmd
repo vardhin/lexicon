@@ -1,0 +1,55 @@
+---
+config:
+  layout: elk
+  theme: neutral
+  look: neo
+---
+flowchart TB
+ subgraph Body["Layer 0: The Body (Tauri + Bun + Svelte)"]
+        TC["Tauri Core (Rust) Nervous System &amp; Window Manager"]
+        UI["Svelte Frontend (The Skin) Renders Synapse Bar &amp; Glass Widgets"]
+        HW["Hidden WebViews (The Organs) WhatsApp, Discord, etc. (Injected JS)"]
+  end
+ subgraph Brain["Layer 1: The Brain (uv + Python + FastAPI)"]
+        API["FastAPI App The Central Router"]
+        WS["WebSocket Hook: The Skin Connection"]
+        RE["Rule-Based Grammar Engine Deterministic Logic Pipeline"]
+  end
+ subgraph Spine["Layer 2: The Spine (Pub/Sub Dock)"]
+        PS[["Redis / ZeroMQ Event Message Bus"]]
+  end
+ subgraph Memory["Layer 3: The Memory (SurrealDB)"]
+        DB[("SurrealDB Graph &amp; Document Storage (Nodes, Edges, Events)")]
+  end
+ subgraph External["Layer 4: External Sensors (Optional Microservices)"]
+        SysMon["SysMon Daemon (System Resource Sensor)"]
+        CLI["CLI / Local Scripts (Pushing ad-hoc data)"]
+  end
+    TC <-- IPC --> UI
+    HW -- DOM Events via Injected JS --> TC
+    API <--> WS & RE
+    TC -- Publishes Web Event JSON --> PS
+    SysMon -- Publishes Sys Event JSON --> PS
+    CLI -- Publishes Event JSON --> PS
+    PS -- Consumes Sensory Stream --> API
+    API -- Logs Raw Event & Updates Graph --> DB
+    RE -- Queries Context & Rules --> DB
+    RE -- "Returns Execution Action (e.g., ALERT_SKIN)" --> API
+    WS -- Pushes UI Payload (Triggers CSS Morph) --> UI
+    UI -- Sends User Commands / Sudo Auth --> WS
+
+     TC:::skin
+     UI:::skin
+     HW:::organ
+     API:::brain
+     WS:::brain
+     RE:::brain
+     PS:::spine
+     DB:::memory
+     SysMon:::organ
+     CLI:::organ
+    classDef skin fill:#2a2a35,stroke:#a855f7,stroke-width:2px,color:#fff
+    classDef brain fill:#1e3a8a,stroke:#3b82f6,stroke-width:2px,color:#fff
+    classDef spine fill:#7f1d1d,stroke:#ef4444,stroke-width:2px,color:#fff
+    classDef memory fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#fff
+    classDef organ fill:#78350f,stroke:#f59e0b,stroke-width:2px,color:#fff

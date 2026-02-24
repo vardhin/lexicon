@@ -1,0 +1,243 @@
+<script>
+  import { onMount, onDestroy } from 'svelte';
+  import { createWS } from '$lib/ws.js';
+  import registry from '$lib/widgets/index.js';
+
+  // ── state ──
+  let ws = null;
+  let connected = false;
+  let query = '';
+  let feedback = '';
+  let feedbackTimer = null;
+  let history = [];
+  let historyIdx = -1;
+  let inputEl;
+
+  // The dynamic render list — CRUD'd by websocket messages.
+  // Each entry: { id, type, x, y, w, h, props, component }
+  let widgets = [];
+
+  // ── lifecycle ──
+  onMount(() => {
+    ws = createWS(handleMessage, function (s) { connected = s; });
+    setTimeout(function () { if (inputEl) inputEl.focus(); }, 100);
+    window.addEventListener('focus', refocus);
+  });
+
+  onDestroy(() => {
+    if (ws) ws.close();
+    window.removeEventListener('focus', refocus);
+    clearTimeout(feedbackTimer);
+  });
+
+  function refocus() {
+    setTimeout(function () { if (inputEl) inputEl.focus(); }, 50);
+  }
+
+  // ── websocket message handler (CRUD on render list) ──
+  function handleMessage(msg) {
+    if (msg.type === 'RENDER_WIDGET') {
+      var comp = registry[msg.widget_type];
+      if (!comp) {
+        showFeedback('Unknown widget: ' + msg.widget_type);
+        return;
+      }
+      // Add to render list
+      widgets = widgets.concat([{
+        id:    msg.widget_id,
+        type:  msg.widget_type,
+        x:     msg.x,
+        y:     msg.y,
+        w:     msg.w,
+        h:     msg.h,
+        props: msg.props || {},
+        component: comp,
+      }]);
+    }
+    else if (msg.type === 'REMOVE_WIDGET') {
+      widgets = widgets.filter(function (w) { return w.id !== msg.widget_id; });
+    }
+    else if (msg.type === 'CLEAR_WIDGETS') {
+      widgets = [];
+    }
+    else if (msg.type === 'FEEDBACK') {
+      showFeedback(msg.message);
+    }
+  }
+
+  function showFeedback(text) {
+    feedback = text;
+    clearTimeout(feedbackTimer);
+    feedbackTimer = setTimeout(function () { feedback = ''; }, 4000);
+  }
+
+  // ── dismiss a single widget ──
+  function dismiss(widgetId) {
+    widgets = widgets.filter(function (w) { return w.id !== widgetId; });
+    if (ws) ws.send({ type: 'dismiss_widget', widget_id: widgetId });
+  }
+
+  // ── input handling ──
+  function submit() {
+    var text = query.trim();
+    if (!text) return;
+    history = history.concat([text]);
+    historyIdx = history.length;
+    if (ws && ws.isOpen()) {
+      ws.send({ type: 'query', text: text });
+    } else {
+      showFeedback('Not connected to Lexicon Brain');
+    }
+    query = '';
+  }
+
+  function onKey(e) {
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (historyIdx > 0) { historyIdx--; query = history[historyIdx]; }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (historyIdx < history.length - 1) { historyIdx++; query = history[historyIdx]; }
+      else { historyIdx = history.length; query = ''; }
+    } else if (e.key === 'Escape') {
+      query = '';
+    }
+  }
+</script>
+
+<!-- svelte-ignore a11y-click-events-have-key-events -->
+<!-- svelte-ignore a11y-no-static-element-interactions -->
+<div class="overlay" on:click={() => { if (inputEl) inputEl.focus(); }}>
+
+  <!-- connection dot -->
+  <div class="dot" class:on={connected}></div>
+
+  <!-- dynamic widget layer -->
+  {#each widgets as w (w.id)}
+    <div
+      class="widget-frame"
+      style="left:{w.x}px; top:{w.y}px; width:{w.w}px; height:{w.h}px;"
+    >
+      <svelte:component this={w.component} props={w.props} onDismiss={() => dismiss(w.id)} />
+    </div>
+  {/each}
+
+  <!-- feedback toast -->
+  {#if feedback}
+    <div class="toast">{feedback}</div>
+  {/if}
+
+  <!-- synapse bar -->
+  <div class="bar-wrap">
+    <div class="bar">
+      <span class="icon">✦</span>
+      <form on:submit|preventDefault={submit}>
+        <input
+          bind:this={inputEl}
+          bind:value={query}
+          on:keydown={onKey}
+          class="input"
+          placeholder="ask lexicon anything..."
+          spellcheck="false"
+          autocomplete="off"
+        />
+      </form>
+    </div>
+  </div>
+</div>
+
+<style>
+  :global(html, body) {
+    margin: 0; padding: 0;
+    background: transparent !important;
+    overflow: hidden;
+    height: 100%; width: 100%;
+  }
+
+  .overlay {
+    position: fixed; inset: 0;
+    background: rgba(15, 15, 25, 0.55);
+    z-index: 9999;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+
+  /* ── connection indicator ── */
+  .dot {
+    position: fixed; top: 16px; right: 16px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #ff5f57;
+    box-shadow: 0 0 8px rgba(255,95,87,0.5);
+    z-index: 10010;
+    transition: all 0.3s;
+  }
+  .dot.on {
+    background: #28c840;
+    box-shadow: 0 0 8px rgba(40,200,64,0.5);
+  }
+
+  /* ── widget frames ── */
+  .widget-frame {
+    position: absolute;
+    background: rgba(20, 20, 35, 0.65);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.05);
+    overflow: hidden;
+    z-index: 10000;
+    animation: pop 0.3s cubic-bezier(0.16,1,0.3,1) forwards;
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: scale(0.92) translateY(8px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  /* ── feedback toast ── */
+  .toast {
+    position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+    background: rgba(30,30,50,0.85);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 10px 20px;
+    color: rgba(255,255,255,0.6);
+    font-size: 12px;
+    backdrop-filter: blur(8px);
+    z-index: 10020;
+    animation: fadein 0.25s ease-out;
+    max-width: 500px; text-align: center;
+  }
+  @keyframes fadein {
+    from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+
+  /* ── synapse bar ── */
+  .bar-wrap {
+    position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%);
+    z-index: 10020;
+    width: 560px; max-width: calc(100vw - 48px);
+  }
+  .bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px;
+    background: rgba(20,20,35,0.7);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    backdrop-filter: blur(16px);
+    box-shadow: 0 8px 40px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.06);
+    transition: border-color 0.2s;
+  }
+  .bar:focus-within {
+    border-color: rgba(124,138,255,0.4);
+    box-shadow: 0 8px 40px rgba(0,0,0,0.35), 0 0 0 1px rgba(124,138,255,0.15);
+  }
+  .icon { color: #7c8aff; font-size: 18px; opacity: 0.7; }
+  form { flex: 1; display: flex; }
+  .input {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: rgba(255,255,255,0.9);
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 14px; caret-color: #7c8aff; line-height: 1.5;
+  }
+  .input::placeholder { color: rgba(255,255,255,0.2); }
+</style>

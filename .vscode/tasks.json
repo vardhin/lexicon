@@ -1,0 +1,40 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Lexicon Brain Server",
+			"type": "shell",
+			"command": "bash /home/vardhin/Documents/git/lexicon/lexicon-backend/run.sh",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Lexicon Brain Server",
+			"type": "shell",
+			"command": "bash /home/vardhin/Documents/git/lexicon/lexicon-backend/run.sh",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Lexicon Brain",
+			"type": "shell",
+			"command": "bash /home/vardhin/Documents/git/lexicon/lexicon-backend/run.sh",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Lexicon Dev",
+			"type": "shell",
+			"command": "bash /home/vardhin/Documents/git/lexicon/dev.sh",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Lexicon Dev",
+			"type": "shell",
+			"command": "bash /home/vardhin/Documents/git/lexicon/dev.sh",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
