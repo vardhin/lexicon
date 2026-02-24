@@ -42,4 +42,10 @@ EXTENSION = {
     "name": "clock",
     "match": match,
     "action": action,
+    "help": {
+        "title": "Clock",
+        "icon": "🕐",
+        "description": "Live digital clock with date",
+        "examples": ["clock", "what's the time", "show clock"],
+    },
 }

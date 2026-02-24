@@ -72,10 +72,18 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Widget renderer (Layer 0)** | ✅ Complete | Dynamic render list driven by WebSocket. Widgets positioned absolutely at `(x, y, w, h)` from backend. Glass-blur frames, pop-in animation, per-widget dismiss. |
 | **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` strings → Svelte components. Adding a widget = 1 import + 1 line. |
 | **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `FEEDBACK`, `RESTORE_STATE`. |
-| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket endpoint at `/ws`, health check at `/health`, connection manager with broadcast support, CORS enabled. Sends `RESTORE_STATE` on connect. |
+| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, system stats at `/system`. Connection manager with broadcast, CORS enabled. Sends `RESTORE_STATE` on connect. |
 | **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline, returns action list. Fallback feedback for unknown commands. |
 | **Extension: clock** | ✅ Complete | Matches ~7 natural language patterns ("what's the time", "show clock", etc). Returns `RENDER_WIDGET` with clock type. Frontend renders live-updating `HH:MM:SS` with gradient text. |
 | **Extension: clear** | ✅ Complete | Matches "clear", "dismiss all", "close", etc. Returns `CLEAR_WIDGETS` to wipe the render list. |
+| **Extension: timer** | ✅ Complete | Countdown timer — "timer 5 min", "countdown 1h30m", "set timer 30s". Parses h/m/s durations. Widget has start/pause/reset controls and progress bar. |
+| **Extension: date** | ✅ Complete | Rich date display — "what's the date", "what day is it". Shows weekday, date, year, day-of-year, week number, and year-progress bar. |
+| **Extension: note** | ✅ Complete | Sticky notes — "note buy groceries", "remind me to call bob". Editable text with click-to-edit. |
+| **Extension: calculator** | ✅ Complete | Inline math — "calc 2+2", "= pi * 2", "math sqrt(144)". Safe eval with trig, log, constants. Shows expression → result. |
+| **Extension: sysmon** | ✅ Complete | Live system monitor — "system", "show stats". CPU/RAM/disk bars with live polling from `/system` endpoint (reads `/proc`, zero dependencies). |
+| **Extension: weather** | ✅ Complete | Weather widget (demo mode) — "weather", "forecast". Time-based display placeholder. Ready for real API integration. |
+| **Extension: help** | ✅ Complete | Dynamic help guide — "help", "commands", "?". Auto-collects help metadata from all loaded extensions. Shows icons, descriptions, example commands, and usage tips. |
+| **Widget dragging** | ✅ Complete | Pointer-based drag via top handle strip. Dragged positions persist to SurrealDB Memory and restore on relaunch. |
 | **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists UI state (open widgets) and command history. Auto-restores widgets on reconnect. No external server needed. |
 | **Dev tooling** | ✅ Complete | `dev.sh` — builds Svelte → builds Tauri release binary → starts backend. One command to rebuild everything. |
 
@@ -89,7 +97,6 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Redis / ZeroMQ event bus (Spine)** | 2 | Pub/Sub decoupling between Brain, Sensors, and Body. `infra/` folder exists but is empty. |
 | **SysMon daemon** | 4 | System resource sensor publishing CPU/RAM/disk/network events to the Spine. |
 | **CLI event scripts** | 4 | Ad-hoc scripts that push events into the bus (e.g., `lexicon push "meeting in 5min"`). |
-| **More extensions** | 1 | Timer, date, weather, note, system monitor widgets — logic existed previously, needs to be re-created as standalone extensions + Svelte widgets. |
 
 ---
 
@@ -212,8 +219,15 @@ Restart the backend (it auto-reloads), rebuild the frontend (`./dev.sh`). Done.
 lexicon/
 ├── dev.sh                          # Build + run everything
 ├── extensions/                     # Backend extension logic (Python)
+│   ├── calculator.py               #   Inline math evaluator
+│   ├── clear.py                    #   Clear all widgets
 │   ├── clock.py                    #   Clock widget trigger
-│   └── clear.py                    #   Clear all widgets
+│   ├── date.py                     #   Date display widget
+│   ├── help.py                     #   Help guide (auto-collects from all extensions)
+│   ├── note.py                     #   Sticky note widget
+│   ├── sysmon.py                   #   System monitor widget
+│   ├── timer.py                    #   Countdown timer widget
+│   └── weather.py                  #   Weather widget (demo)
 ├── lexicon-backend/                # Layer 1: The Brain
 │   ├── pyproject.toml              #   uv project config
 │   ├── run.sh                      #   Start backend standalone
@@ -231,7 +245,14 @@ lexicon/
 │   │       ├── ws.js               #   WebSocket client (auto-reconnect)
 │   │       └── widgets/
 │   │           ├── index.js        #   Widget registry
-│   │           └── ClockWidget.svelte
+│   │           ├── ClockWidget.svelte
+│   │           ├── TimerWidget.svelte
+│   │           ├── DateWidget.svelte
+│   │           ├── NoteWidget.svelte
+│   │           ├── CalculatorWidget.svelte
+│   │           ├── SysMonWidget.svelte
+│   │           ├── WeatherWidget.svelte
+│   │           └── HelpWidget.svelte
 │   └── src-tauri/
 │       ├── tauri.conf.json         #   Tauri config (transparent, borderless, always-on-top)
 │       ├── capabilities/           #   Shell + IPC permissions
@@ -249,8 +270,8 @@ lexicon/
 ## Roadmap
 
 - [x] **SurrealDB Memory** — persist UI state, command history, auto-restore on launch
-- [ ] **More extensions** — timer, date, weather, notes, system monitor
-- [ ] **Widget dragging** — let users reposition widgets on the overlay
+- [x] **More extensions** — timer, date, weather, notes, calculator, system monitor
+- [x] **Widget dragging** — pointer-based repositioning with persisted positions
 - [ ] **Redis/ZeroMQ Spine** — decouple Brain from Body with pub/sub
 - [ ] **Hidden WebViews (Organs)** — scrape WhatsApp/Discord/Gmail via injected JS
 - [ ] **SysMon daemon** — push system metrics as events

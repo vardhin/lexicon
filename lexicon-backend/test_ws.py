@@ -13,6 +13,15 @@ async def test():
         print(f"✅ Handshake: {data}")
         assert data["type"] == "connected"
 
+        # Consume any RESTORE_STATE
+        try:
+            peek = await asyncio.wait_for(ws.recv(), timeout=0.5)
+            peek_data = json.loads(peek)
+            if peek_data["type"] == "RESTORE_STATE":
+                print(f"  ℹ️  Consumed RESTORE_STATE ({len(peek_data.get('widgets', []))} widgets)")
+        except asyncio.TimeoutError:
+            pass
+
         # Test clock trigger
         await ws.send(json.dumps({"type": "query", "text": "what's the time"}))
         msg = await ws.recv()

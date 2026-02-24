@@ -117,6 +117,47 @@
     saveState();
   }
 
+  // ── widget dragging ──
+  let dragId = null;
+  let dragOffsetX = 0;
+  let dragOffsetY = 0;
+
+  function onDragStart(e, widgetId) {
+    // Only start drag from the widget frame header area (top 28px)
+    var frame = e.currentTarget;
+    var rect = frame.getBoundingClientRect();
+    var localY = e.clientY - rect.top;
+    if (localY > 28) return; // only drag from top strip
+
+    e.preventDefault();
+    e.stopPropagation();
+    dragId = widgetId;
+    dragOffsetX = e.clientX - rect.left;
+    dragOffsetY = e.clientY - rect.top;
+
+    window.addEventListener('pointermove', onDragMove);
+    window.addEventListener('pointerup', onDragEnd);
+  }
+
+  function onDragMove(e) {
+    if (!dragId) return;
+    var nx = Math.max(0, e.clientX - dragOffsetX);
+    var ny = Math.max(0, e.clientY - dragOffsetY);
+    widgets = widgets.map(function (w) {
+      if (w.id === dragId) return Object.assign({}, w, { x: nx, y: ny });
+      return w;
+    });
+  }
+
+  function onDragEnd() {
+    if (dragId) {
+      dragId = null;
+      saveState();
+    }
+    window.removeEventListener('pointermove', onDragMove);
+    window.removeEventListener('pointerup', onDragEnd);
+  }
+
   // ── input handling ──
   function submit() {
     var text = query.trim();
@@ -154,10 +195,16 @@
 
   <!-- dynamic widget layer -->
   {#each widgets as w (w.id)}
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       class="widget-frame"
+      class:dragging={dragId === w.id}
       style="left:{w.x}px; top:{w.y}px; width:{w.w}px; height:{w.h}px;"
+      on:pointerdown={(e) => onDragStart(e, w.id)}
     >
+      <div class="drag-handle">
+        <span class="drag-dots">⋮⋮</span>
+      </div>
       <svelte:component this={w.component} props={w.props} onDismiss={() => dismiss(w.id)} />
     </div>
   {/each}
@@ -226,7 +273,28 @@
     overflow: hidden;
     z-index: 10000;
     animation: pop 0.3s cubic-bezier(0.16,1,0.3,1) forwards;
+    transition: box-shadow 0.15s;
   }
+  .widget-frame.dragging {
+    box-shadow: 0 16px 48px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08);
+    z-index: 10005;
+    cursor: grabbing;
+  }
+  /* ── drag handle ── */
+  .drag-handle {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: grab; z-index: 2;
+    user-select: none;
+  }
+  .drag-handle:active { cursor: grabbing; }
+  .drag-dots {
+    font-size: 10px; letter-spacing: 2px;
+    color: rgba(255,255,255,0.12);
+    transition: color 0.15s;
+  }
+  .drag-handle:hover .drag-dots { color: rgba(255,255,255,0.35); }
   @keyframes pop {
     from { opacity: 0; transform: scale(0.92) translateY(8px); }
     to   { opacity: 1; transform: scale(1) translateY(0); }

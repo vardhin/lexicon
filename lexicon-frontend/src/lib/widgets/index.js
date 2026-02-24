@@ -9,9 +9,23 @@
  */
 
 import ClockWidget from './ClockWidget.svelte';
+import TimerWidget from './TimerWidget.svelte';
+import DateWidget from './DateWidget.svelte';
+import NoteWidget from './NoteWidget.svelte';
+import CalculatorWidget from './CalculatorWidget.svelte';
+import SysMonWidget from './SysMonWidget.svelte';
+import WeatherWidget from './WeatherWidget.svelte';
+import HelpWidget from './HelpWidget.svelte';
 
 const registry = {
   clock: ClockWidget,
+  timer: TimerWidget,
+  date: DateWidget,
+  note: NoteWidget,
+  calculator: CalculatorWidget,
+  sysmon: SysMonWidget,
+  weather: WeatherWidget,
+  help: HelpWidget,
 };
 
 export default registry;

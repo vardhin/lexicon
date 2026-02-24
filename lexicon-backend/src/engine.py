@@ -45,6 +45,15 @@ class GrammarEngine:
 
         print(f"🧩 {len(self.extensions)} extension(s) loaded")
 
+    def get_help_entries(self):
+        """Collect help metadata from all loaded extensions."""
+        entries = []
+        for ext in self.extensions:
+            h = ext.get("help")
+            if h:
+                entries.append(h)
+        return entries
+
     def process(self, text):
         """Run text through all extensions, return list of actions."""
         text_lower = text.lower().strip()

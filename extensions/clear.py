@@ -25,4 +25,10 @@ EXTENSION = {
     "name": "clear",
     "match": match,
     "action": action,
+    "help": {
+        "title": "Clear",
+        "icon": "🧹",
+        "description": "Dismiss all widgets from the screen",
+        "examples": ["clear", "dismiss all", "close all"],
+    },
 }
