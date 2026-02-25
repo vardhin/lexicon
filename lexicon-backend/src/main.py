@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.engine import GrammarEngine
 from src.connection_manager import ConnectionManager
 from src.memory import Memory
-from src.shell import PersistentShell
+from src.shell import ShellManager
 from src.spine import Spine
 
 manager = ConnectionManager()
@@ -137,8 +137,8 @@ async def websocket_endpoint(ws: WebSocket):
     conn_id = str(uuid.uuid4())[:8]
     await manager.connect(ws, conn_id)
 
-    # Each connection gets its own persistent shell
-    shell = PersistentShell()
+    # Each connection gets its own shell manager (multiple sessions)
+    shell = ShellManager()
 
     try:
         await ws.send_json({"type": "connected", "connection_id": conn_id})
@@ -158,14 +158,6 @@ async def websocket_endpoint(ws: WebSocket):
             await ws.send_json({
                 "type": "RESTORE_STATE",
                 "widgets": saved_widgets,
-            })
-
-        # Restore shell history
-        shell_sessions = await memory.get_shell_sessions(limit=30)
-        if shell_sessions:
-            await ws.send_json({
-                "type": "RESTORE_SHELL",
-                "sessions": shell_sessions,
             })
 
         while True:
@@ -203,14 +195,34 @@ async def websocket_endpoint(ws: WebSocket):
             elif msg_type == "dismiss_all":
                 await ws.send_json({"type": "CLEAR_WIDGETS"})
 
-            elif msg_type == "shell":
-                cmd = payload.get("cmd", "").strip()
-                shell_id = payload.get("shell_id", str(uuid.uuid4())[:8])
-                if cmd:
-                    await shell.run_command(ws, shell_id, cmd, memory)
+            # ── Shell (PTY via Shell Microservice — multi-session) ──
+
+            elif msg_type == "shell_spawn":
+                session_id = payload.get("session_id", "default")
+                cols = payload.get("cols", 120)
+                rows = payload.get("rows", 30)
+                await shell.spawn(session_id, ws, cols, rows)
+
+            elif msg_type == "shell_input":
+                session_id = payload.get("session_id", "default")
+                data = payload.get("data", "")
+                if data:
+                    await shell.send_input(session_id, data)
+
+            elif msg_type == "shell_resize":
+                session_id = payload.get("session_id", "default")
+                cols = payload.get("cols", 120)
+                rows = payload.get("rows", 30)
+                await shell.resize(session_id, cols, rows)
+
+            elif msg_type == "shell_signal":
+                session_id = payload.get("session_id", "default")
+                sig = payload.get("sig", "INT")
+                await shell.send_signal(session_id, sig)
 
             elif msg_type == "shell_kill":
-                await shell.kill_current()
+                session_id = payload.get("session_id", "default")
+                await shell.kill(session_id)
 
             # ── Workspace operations ──
 
@@ -263,12 +275,6 @@ async def websocket_endpoint(ws: WebSocket):
                             "type": "RESTORE_STATE",
                             "widgets": saved_widgets,
                         })
-                    shell_sessions = await memory.get_shell_sessions(limit=30)
-                    if shell_sessions:
-                        await ws.send_json({
-                            "type": "RESTORE_SHELL",
-                            "sessions": shell_sessions,
-                        })
                     workspaces = await memory.list_workspaces()
                     await ws.send_json({
                         "type": "WORKSPACE_INFO",
@@ -291,12 +297,6 @@ async def websocket_endpoint(ws: WebSocket):
                                 "type": "RESTORE_STATE",
                                 "widgets": saved_widgets,
                             })
-                        shell_sessions = await memory.get_shell_sessions(limit=30)
-                        if shell_sessions:
-                            await ws.send_json({
-                                "type": "RESTORE_SHELL",
-                                "sessions": shell_sessions,
-                            })
                     workspaces = await memory.list_workspaces()
                     await ws.send_json({
                         "type": "WORKSPACE_INFO",
@@ -306,8 +306,8 @@ async def websocket_endpoint(ws: WebSocket):
 
     except WebSocketDisconnect:
         manager.disconnect(conn_id)
-        await shell.close()
+        await shell.close_all()
     except Exception as e:
         print(f"❌ {conn_id}: {e}")
         manager.disconnect(conn_id)
-        await shell.close()
+        await shell.close_all()

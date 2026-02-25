@@ -34,28 +34,21 @@
   let pageHeight = 900; // safe default; updated on mount
   let currentPage = 0;
 
-  // ── shell sections ──
-  // { id, cmd, lines: string[], done: boolean, exitCode: number, y: number }
-  let shellSections = [];
+  // ── terminal session counter ──
+  let termSessionCounter = 0;
+
+  // ── active shell session management ──
+  // sessions: [{ id, shellName, connected, page }]
+  // each session occupies a full page (divider-to-divider)
+  let sessions = [];
+  let activeSessionId = null;
+  let showSessionPicker = false;
 
   // ── workspaces ──
   let workspaceList = ['default'];
   let currentWorkspace = 'default';
   let showWorkspaceMenu = false;
   let newWorkspaceName = '';
-
-  // track the bottom of content for placing new shell sections
-  function getNextShellY() {
-    var y = 20;
-    // below any existing shell sections
-    for (var i = 0; i < shellSections.length; i++) {
-      var s = shellSections[i];
-      var h = 60 + (s.lines.length * 19) + 30;
-      var bottom = s.y + h;
-      if (bottom > y) y = bottom + 16;
-    }
-    return y;
-  }
 
   // ── toggle overlay visibility (called via Spine → WebSocket → Rust IPC) ──
   function toggleOverlay() {
@@ -76,6 +69,8 @@
     window.addEventListener('resize', onResize);
 
     ws = createWS(handleMessage, function (s) { connected = s; });
+    // Expose ws globally so TerminalWidget instances can access it
+    window.__lexicon_ws = ws;
     setTimeout(function () { if (inputEl) inputEl.focus(); }, 100);
     window.addEventListener('focus', refocus);
     window.addEventListener('beforeunload', saveState);
@@ -83,7 +78,15 @@
 
   onDestroy(() => {
     saveState();
+    // Kill all shell sessions
+    if (ws && ws.isOpen()) {
+      for (var i = 0; i < sessions.length; i++) {
+        ws.send({ type: 'shell_kill', session_id: sessions[i].id });
+      }
+    }
     if (ws) ws.close();
+    window.__lexicon_ws = null;
+    window.__lexicon_terminals = {};
     window.removeEventListener('focus', refocus);
     window.removeEventListener('beforeunload', saveState);
     window.removeEventListener('resize', onResize);
@@ -119,6 +122,11 @@
     currentPage = Math.round(canvasEl.scrollTop / pageHeight);
     if (canvasEl.scrollTop + pageHeight * 1.5 > pageCount * pageHeight) {
       pageCount += 1;
+    }
+    // Auto-activate session when scrolling to a terminal page
+    var sess = sessionForPage(currentPage);
+    if (sess) {
+      activeSessionId = sess.id;
     }
   }
 
@@ -166,17 +174,40 @@
     else if (msg.type === 'FEEDBACK') {
       showFeedback(msg.message);
     }
+
+    // ── Shell messages → routed to the correct TerminalWidget ──
+    else if (msg.type === 'SHELL_SPAWNED') {
+      // Update session tracking
+      sessions = sessions.map(function (s) {
+        if (s.id === msg.session_id) return Object.assign({}, s, { connected: true, shellName: msg.shell || 'shell' });
+        return s;
+      });
+      var t1 = window.__lexicon_terminals && window.__lexicon_terminals[msg.session_id];
+      if (t1 && t1.onSpawned) t1.onSpawned(msg);
+    }
     else if (msg.type === 'SHELL_OUTPUT') {
-      appendShellLine(msg.shell_id, msg.text);
+      var t2 = window.__lexicon_terminals && window.__lexicon_terminals[msg.session_id];
+      if (t2 && t2.onOutput) t2.onOutput(msg.data);
     }
-    else if (msg.type === 'SHELL_DONE') {
-      finishShell(msg.shell_id, msg.exit_code);
+    else if (msg.type === 'SHELL_EXITED') {
+      sessions = sessions.map(function (s) {
+        if (s.id === msg.session_id) return Object.assign({}, s, { connected: false });
+        return s;
+      });
+      var t3 = window.__lexicon_terminals && window.__lexicon_terminals[msg.session_id];
+      if (t3 && t3.onExited) t3.onExited(msg.exit_code);
     }
-    else if (msg.type === 'RESTORE_SHELL') {
-      restoreShellSessions(msg.sessions || []);
+    else if (msg.type === 'SHELL_ERROR') {
+      sessions = sessions.map(function (s) {
+        if (s.id === msg.session_id) return Object.assign({}, s, { connected: false });
+        return s;
+      });
+      var t4 = window.__lexicon_terminals && window.__lexicon_terminals[msg.session_id];
+      if (t4 && t4.onError) t4.onError(msg.message);
+      else showFeedback(msg.message || 'Shell error');
     }
     else if (msg.type === 'CLEAR_SHELL') {
-      shellSections = [];
+      // No-op — individual terminals handle their own state
     }
     else if (msg.type === 'WORKSPACE_INFO') {
       workspaceList = msg.workspaces || ['default'];
@@ -294,90 +325,94 @@
     window.removeEventListener('pointerup', onResizeEnd);
   }
 
-  // ── shell execution ──
-  function startShell(cmd) {
-    var id = 'sh-' + Date.now().toString(36);
-    var yPos = getNextShellY();
-    // If there's a visible scroll, place relative to viewport
-    if (canvasEl && canvasEl.scrollTop > 0) {
-      var viewY = canvasEl.scrollTop + 30;
-      if (viewY > yPos) yPos = viewY;
-    }
-    shellSections = shellSections.concat([{
-      id: id, cmd: cmd, lines: [], done: false, exitCode: null, y: yPos,
-    }]);
-    ensurePages(yPos + 200);
+  // ── spawn a terminal session on a full page ──
 
-    // Auto-scroll to the new section
-    tick().then(function () {
-      if (canvasEl) {
-        canvasEl.scrollTo({ top: yPos - 30, behavior: 'smooth' });
-      }
-    });
-
-    ws.send({ type: 'shell', cmd: cmd, shell_id: id });
-  }
-
-  function appendShellLine(shellId, text) {
-    shellSections = shellSections.map(function (s) {
-      if (s.id === shellId) {
-        return Object.assign({}, s, { lines: s.lines.concat([text]) });
-      }
-      return s;
-    });
-
-    // Auto-scroll to follow output
-    tick().then(function () {
-      if (!canvasEl) return;
-      var section = shellSections.find(function (s) { return s.id === shellId; });
-      if (section) {
-        var bottomY = section.y + 60 + (section.lines.length * 19) + 30;
-        ensurePages(bottomY);
-        var viewBottom = canvasEl.scrollTop + canvasEl.clientHeight;
-        if (bottomY > viewBottom - 80) {
-          canvasEl.scrollTo({ top: bottomY - canvasEl.clientHeight + 100, behavior: 'smooth' });
-        }
-      }
-    });
-  }
-
-  function finishShell(shellId, exitCode) {
-    shellSections = shellSections.map(function (s) {
-      if (s.id === shellId) {
-        return Object.assign({}, s, { done: true, exitCode: exitCode });
-      }
-      return s;
-    });
-  }
-
-  function restoreShellSessions(sessions) {
-    if (!sessions.length) return;
-    var yPos = 20;
-    var restored = [];
+  function findNextFreePage() {
+    // Find the first page not occupied by a terminal session
+    var usedPages = {};
     for (var i = 0; i < sessions.length; i++) {
-      var s = sessions[i];
-      var lines = s.output ? s.output.split('\n').map(function (l) { return l + '\n'; }) : [];
-      // Remove trailing empty newline from split
-      if (lines.length > 0 && lines[lines.length - 1] === '\n') lines.pop();
-      restored.push({
-        id: s.shell_id,
-        cmd: s.cmd,
-        lines: lines,
-        done: true,
-        exitCode: s.exit_code,
-        y: yPos,
-      });
-      var sectionH = 60 + (lines.length * 19) + 30 + 16;
-      yPos += sectionH;
+      usedPages[sessions[i].page] = true;
     }
-    if (restored.length > 0) {
-      shellSections = restored;
-      ensurePages(yPos + 100);
+    // Start from page 1 (page 0 is the landing page)
+    for (var p = 1; p < pageCount + 2; p++) {
+      if (!usedPages[p]) return p;
     }
+    return pageCount;
+  }
+
+  function spawnSession() {
+    termSessionCounter++;
+    var sessionId = 'sh-' + Date.now().toString(36) + '-' + termSessionCounter;
+
+    // Allocate a full page for this terminal
+    var page = findNextFreePage();
+    // Ensure we have enough pages
+    if (page >= pageCount) {
+      pageCount = page + 2;
+    }
+
+    // Register session and make it active
+    sessions = sessions.concat([{ id: sessionId, shellName: 'shell', connected: false, page: page }]);
+    activeSessionId = sessionId;
+
+    // Request PTY spawn from backend
+    if (ws && ws.isOpen()) {
+      ws.send({ type: 'shell_spawn', session_id: sessionId, cols: 120, rows: 30 });
+    }
+
+    // Scroll to that page
+    tick().then(function () {
+      scrollToPage(page);
+    });
+
+    return sessionId;
+  }
+
+  function getOrCreateSession() {
+    // Return active session if it exists and is connected
+    if (activeSessionId) {
+      var sess = sessions.find(function (s) { return s.id === activeSessionId; });
+      if (sess && sess.connected) return activeSessionId;
+    }
+    // If active session exists but is not connected, respawn it
+    if (activeSessionId) {
+      var existing = sessions.find(function (s) { return s.id === activeSessionId; });
+      if (existing) {
+        if (ws && ws.isOpen()) {
+          ws.send({ type: 'shell_spawn', session_id: activeSessionId, cols: 120, rows: 30 });
+        }
+        return activeSessionId;
+      }
+    }
+    // No session at all — create one
+    return spawnSession();
+  }
+
+  function switchSession(sessionId) {
+    activeSessionId = sessionId;
+    showSessionPicker = false;
+    // Scroll to the session's page
+    var sess = sessions.find(function (s) { return s.id === sessionId; });
+    if (sess && canvasEl) {
+      scrollToPage(sess.page);
+    }
+    if (inputEl) inputEl.focus();
+  }
+
+  function killSession(sessionId) {
+    if (ws && ws.isOpen()) {
+      ws.send({ type: 'shell_kill', session_id: sessionId });
+    }
+    sessions = sessions.filter(function (s) { return s.id !== sessionId; });
+    // Switch active to the last remaining session
+    if (activeSessionId === sessionId) {
+      activeSessionId = sessions.length > 0 ? sessions[sessions.length - 1].id : null;
+    }
+    saveState();
   }
 
   // ── input handling ──
-  var _shellPrefixRe = /^(ls|cd|cat|echo|pwd|mkdir|rm|cp|mv|grep|find|head|tail|wc|df|du|free|uname|whoami|which|env|export|curl|wget|git|docker|npm|bun|cargo|python|pip|make|gcc|neofetch|htop|top|ps|kill|ping|ssh|scp|tar|zip|unzip|chmod|chown|man|apt|pacman|yay|paru|systemctl|journalctl|ip|ss|mount|lsblk|bat|eza|fd|rg|fzf|sed|awk|sort|uniq|tee|xargs|date|touch|tree|less|more)\b/;
+  var _shellPrefixRe = /^(ls|cd|cat|echo|pwd|mkdir|rm|cp|mv|grep|find|head|tail|wc|df|du|free|uname|whoami|which|env|export|curl|wget|git|docker|npm|bun|cargo|python|pip|make|gcc|neofetch|htop|top|ps|kill|ping|ssh|scp|tar|zip|unzip|chmod|chown|man|apt|pacman|yay|paru|systemctl|journalctl|ip|ss|mount|lsblk|bat|eza|fd|rg|fzf|sed|awk|sort|uniq|tee|xargs|date|touch|tree|less|more|btop|vim|nvim|nano|tmux|screen|ssh|nnn|ranger)\b/;
 
   function submit() {
     var text = query.trim();
@@ -395,7 +430,11 @@
     }
 
     if (isShell && ws && ws.isOpen()) {
-      startShell(shellCmd);
+      var sid = getOrCreateSession();
+      if (sid) {
+        // Send the command as raw input to the PTY
+        ws.send({ type: 'shell_input', session_id: sid, data: shellCmd + '\n' });
+      }
     } else if (ws && ws.isOpen()) {
       ws.send({ type: 'query', text: text });
     } else {
@@ -413,25 +452,32 @@
       if (historyIdx < history.length - 1) { historyIdx++; query = history[historyIdx]; }
       else { historyIdx = history.length; query = ''; }
     } else if (e.key === 'Escape') {
-      if (query === '' && tauriInvoke) {
-        // If query is already empty, hide the overlay via Rust IPC
+      if (showSessionPicker) {
+        showSessionPicker = false;
+      } else if (query === '' && tauriInvoke) {
         tauriInvoke('toggle_window');
       } else {
         query = '';
       }
-    } else if (e.key === 'c' && e.ctrlKey) {
-      // Ctrl+C — kill running shell command
+    } else if (e.key === '`' && e.ctrlKey) {
+      // Ctrl+` — spawn a new terminal session
       e.preventDefault();
-      killShell();
-    }
-  }
-
-  function killShell() {
-    if (!ws || !ws.isOpen()) return;
-    var hasRunning = shellSections.some(function (s) { return !s.done; });
-    if (hasRunning) {
-      ws.send({ type: 'shell_kill' });
-      showFeedback('^C');
+      spawnSession();
+    } else if (e.key === 'Tab' && e.ctrlKey) {
+      // Ctrl+Tab — cycle sessions
+      e.preventDefault();
+      if (sessions.length > 1 && activeSessionId) {
+        var idx = sessions.findIndex(function (s) { return s.id === activeSessionId; });
+        var next = (idx + 1) % sessions.length;
+        switchSession(sessions[next].id);
+      }
+    } else if (e.key === 'c' && e.ctrlKey) {
+      // Ctrl+C — send SIGINT to active session
+      e.preventDefault();
+      if (activeSessionId && ws && ws.isOpen()) {
+        ws.send({ type: 'shell_signal', session_id: activeSessionId, sig: 'INT' });
+        showFeedback('^C');
+      }
     }
   }
 
@@ -444,9 +490,14 @@
 
   function clearWorkspace() {
     if (!ws || !ws.isOpen()) return;
+    // Kill all shell sessions
+    for (var i = 0; i < sessions.length; i++) {
+      ws.send({ type: 'shell_kill', session_id: sessions[i].id });
+    }
+    sessions = [];
+    activeSessionId = null;
     ws.send({ type: 'clear_workspace' });
     widgets = [];
-    shellSections = [];
     showFeedback('Workspace cleared');
     showWorkspaceMenu = false;
   }
@@ -481,6 +532,11 @@
   $: totalHeight = Math.max(pageCount * pageHeight, pageHeight);
   $: pageIndices = Array.from({ length: pageCount }, function (_, i) { return i; });
   $: dividerPositions = pageIndices.slice(1).map(function (i) { return i * pageHeight; });
+
+  // Map page index → session (if a terminal occupies that page)
+  function sessionForPage(pageIdx) {
+    return sessions.find(function (s) { return s.page === pageIdx; }) || null;
+  }
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -497,14 +553,21 @@
       <div
         class="sidebar-dot"
         class:active={currentPage === idx}
+        class:has-terminal={sessionForPage(idx) !== null}
         on:click={() => scrollToPage(idx)}
-        title="Page {idx + 1}"
+        title="Page {idx + 1}{sessionForPage(idx) ? ' 🐚' : ''}"
       >
-        <span class="sidebar-num">{idx + 1}</span>
+        {#if sessionForPage(idx)}
+          <span class="sidebar-num">🐚</span>
+        {:else}
+          <span class="sidebar-num">{idx + 1}</span>
+        {/if}
       </div>
     {/each}
 
     <div class="sidebar-bottom">
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div class="sidebar-action" on:click={spawnSession} title="New terminal (Ctrl+`)">🐚</div>
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div class="sidebar-action" on:click={clearWorkspace} title="Clear workspace">🧹</div>
       <div class="ws-label" title={currentWorkspace}>{currentWorkspace.substring(0, 3)}</div>
@@ -567,6 +630,20 @@
         </div>
       {/each}
 
+      <!-- terminal panels (full-page, behind widgets) -->
+      {#each sessions as s (s.id)}
+        <div
+          class="terminal-page"
+          style="top:{s.page * pageHeight}px; height:{pageHeight}px;"
+        >
+          <svelte:component
+            this={registry['terminal']}
+            props={{ session_id: s.id }}
+            onDismiss={() => killSession(s.id)}
+          />
+        </div>
+      {/each}
+
       <!-- widget layer -->
       {#each widgets as w (w.id)}
         <!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -576,6 +653,7 @@
           class:resizing={resizeId === w.id}
           style="left:{w.x}px; top:{w.y}px; width:{w.w}px; height:{w.h}px;"
           on:pointerdown={(e) => onDragStart(e, w.id)}
+          on:wheel|stopPropagation
         >
           <div class="drag-handle"><span class="drag-dots">⋮⋮</span></div>
           <svelte:component this={w.component} props={w.props} onDismiss={() => dismiss(w.id)} />
@@ -583,29 +661,6 @@
           <div class="resize-handle" on:pointerdown={(e) => onResizeStart(e, w.id)}>
             <svg width="10" height="10" viewBox="0 0 10 10"><path d="M9 1L1 9M9 5L5 9M9 9L9 9" stroke="rgba(255,255,255,0.15)" stroke-width="1.2" fill="none"/></svg>
           </div>
-        </div>
-      {/each}
-
-      <!-- shell output sections -->
-      {#each shellSections as sh (sh.id)}
-        <div class="shell-section" style="top:{sh.y}px;">
-          <div class="shell-divider"></div>
-          <div class="shell-header">
-            <span class="shell-prompt">❯</span>
-            <span class="shell-cmd">{sh.cmd}</span>
-            {#if sh.done}
-              <span class="shell-exit" class:err={sh.exitCode !== 0}>exit {sh.exitCode}</span>
-            {:else}
-              <span class="shell-running">running…</span>
-              <!-- svelte-ignore a11y-click-events-have-key-events -->
-              <!-- svelte-ignore a11y-no-static-element-interactions -->
-              <span class="shell-kill" on:click={killShell} title="Ctrl+C">^C</span>
-            {/if}
-          </div>
-          <pre class="shell-output">{sh.lines.join('')}</pre>
-          {#if sh.done}
-            <div class="shell-divider bottom"></div>
-          {/if}
         </div>
       {/each}
 
@@ -620,19 +675,81 @@
   <!-- synapse bar -->
   <div class="bar-wrap">
     <div class="bar">
-      <span class="bar-icon">✦</span>
+      <!-- session picker button (left of input) -->
+      {#if sessions.length > 0}
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <span
+          class="bar-session-btn"
+          class:active={activeSessionId}
+          on:click={() => { showSessionPicker = !showSessionPicker; }}
+          title="Shell sessions (Ctrl+Tab to cycle)"
+        >
+          🐚
+          {#if activeSessionId}
+            <span class="bar-session-dot on">●</span>
+          {/if}
+          <span class="bar-session-count">{sessions.length}</span>
+        </span>
+      {:else}
+        <span class="bar-icon">✦</span>
+      {/if}
+
       <form on:submit|preventDefault={submit}>
         <input
           bind:this={inputEl}
           bind:value={query}
           on:keydown={onKey}
           class="input"
-          placeholder="ask lexicon anything… (prefix ! for shell)"
+          placeholder={activeSessionId ? 'shell command… (Ctrl+` new, Ctrl+Tab switch)' : 'ask lexicon anything… (! prefix for shell)'}
           spellcheck="false"
           autocomplete="off"
         />
       </form>
+
+      <!-- active session indicator on the right -->
+      {#if activeSessionId}
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <span class="bar-active-label" on:click={() => { showSessionPicker = !showSessionPicker; }}>
+          {activeSessionId.substring(0, 10)}
+        </span>
+      {/if}
     </div>
+
+    <!-- session picker dropdown -->
+    {#if showSessionPicker}
+      <!-- svelte-ignore a11y-click-events-have-key-events -->
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div class="session-picker-backdrop" on:click={() => { showSessionPicker = false; }}></div>
+      <div class="session-picker">
+        <div class="sp-title">Shell Sessions</div>
+        {#each sessions as s (s.id)}
+          <div class="sp-item" class:active={s.id === activeSessionId}>
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <span class="sp-name" on:click={() => switchSession(s.id)}>
+              {#if s.connected}
+                <span class="sp-dot on">●</span>
+              {:else}
+                <span class="sp-dot off">●</span>
+              {/if}
+              {s.shellName || 'shell'}
+              <span class="sp-id">{s.id.substring(0, 12)}</span>
+            </span>
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <span class="sp-kill" on:click={() => killSession(s.id)} title="Kill session">✕</span>
+          </div>
+        {/each}
+        <div class="sp-divider"></div>
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div class="sp-item sp-new" on:click={() => { spawnSession(); showSessionPicker = false; }}>
+          <span class="sp-name">+ New session</span>
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -705,6 +822,10 @@
   .sidebar-action:hover {
     background: rgba(255,255,255,0.08);
     border-color: rgba(255,255,255,0.1);
+  }
+  .sidebar-action.active {
+    background: rgba(124,138,255,0.12);
+    border-color: rgba(124,138,255,0.3);
   }
   .ws-label {
     font-size: 8px; font-weight: 700; letter-spacing: 0.5px;
@@ -805,64 +926,27 @@
   }
   .widget-frame:hover .resize-handle { opacity: 1; }
 
-  /* ═══════════════ shell sections ═══════════════ */
-  .shell-section {
+  /* ═══════════════ terminal page panel ═══════════════ */
+  .terminal-page {
     position: absolute;
-    left: 24px; right: 24px;
-    z-index: 8;
-    animation: fadein 0.2s ease-out;
+    left: 0; right: 0;
+    z-index: 2;
+    padding: 8px 12px 80px;
+    box-sizing: border-box;
+    animation: termfade 0.4s ease-out;
   }
-  .shell-divider {
-    height: 1px; margin-bottom: 10px;
-    background: linear-gradient(90deg,
-      transparent 0%,
-      rgba(80,200,120,0.12) 15%,
-      rgba(80,200,120,0.22) 50%,
-      rgba(80,200,120,0.12) 85%,
-      transparent 100%
-    );
+  @keyframes termfade {
+    from { opacity: 0; }
+    to   { opacity: 1; }
   }
-  .shell-divider.bottom { margin-top: 10px; margin-bottom: 0; }
-  .shell-header {
-    display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+
+  /* sidebar terminal indicator */
+  .sidebar-dot.has-terminal {
+    background: rgba(80,200,120,0.08);
+    border-color: rgba(80,200,120,0.2);
   }
-  .shell-prompt { color: rgba(80,200,120,0.8); font-size: 13px; font-weight: 700; }
-  .shell-cmd { color: rgba(255,255,255,0.65); font-size: 12px; font-weight: 500; }
-  .shell-exit {
-    margin-left: auto; font-size: 10px;
-    color: rgba(80,200,120,0.5); letter-spacing: 0.5px;
-  }
-  .shell-exit.err { color: rgba(255,95,87,0.7); }
-  .shell-running {
-    margin-left: auto; font-size: 10px;
-    color: rgba(255,200,60,0.6); letter-spacing: 0.5px;
-    animation: blink 1s ease-in-out infinite;
-  }
-  .shell-kill {
-    font-size: 10px; font-weight: 700;
-    color: rgba(255,95,87,0.7); letter-spacing: 0.5px;
-    cursor: pointer; margin-left: 8px;
-    padding: 2px 6px; border-radius: 4px;
-    background: rgba(255,95,87,0.08);
-    border: 1px solid rgba(255,95,87,0.15);
-    transition: all 0.15s;
-    user-select: none;
-  }
-  .shell-kill:hover {
-    color: rgba(255,95,87,1);
-    background: rgba(255,95,87,0.15);
-    border-color: rgba(255,95,87,0.3);
-  }
-  @keyframes blink { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
-  .shell-output {
-    margin: 0; padding: 10px 14px;
-    background: rgba(10,10,20,0.5);
-    border: 1px solid rgba(255,255,255,0.04);
-    border-radius: 10px;
-    color: rgba(255,255,255,0.65);
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 12px; line-height: 1.5;
-    white-space: pre-wrap; word-break: break-all;
+  .sidebar-dot.has-terminal .sidebar-num {
+    font-size: 12px;
   }
 
   /* ═══════════════ feedback toast ═══════════════ */
@@ -912,6 +996,112 @@
     font-size: 14px; caret-color: #7c8aff; line-height: 1.5;
   }
   .input::placeholder { color: rgba(255,255,255,0.2); }
+
+  /* ═══════════════ session picker & bar session controls ═══════════════ */
+  .bar-session-btn {
+    display: flex; align-items: center; gap: 4px;
+    cursor: pointer; font-size: 16px;
+    padding: 2px 6px; border-radius: 8px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    transition: all 0.15s; user-select: none;
+    position: relative;
+  }
+  .bar-session-btn:hover {
+    background: rgba(124,138,255,0.1);
+    border-color: rgba(124,138,255,0.25);
+  }
+  .bar-session-btn.active {
+    border-color: rgba(40,200,64,0.3);
+  }
+  .bar-session-dot {
+    font-size: 6px; position: absolute; top: 3px; right: 3px;
+  }
+  .bar-session-dot.on { color: #28c840; }
+  .bar-session-count {
+    font-size: 9px; font-weight: 700;
+    color: rgba(255,255,255,0.3);
+    min-width: 12px; text-align: center;
+  }
+  .bar-active-label {
+    font-size: 9px; font-weight: 600;
+    color: rgba(124,138,255,0.5);
+    letter-spacing: 0.5px;
+    cursor: pointer; user-select: none;
+    padding: 3px 8px; border-radius: 6px;
+    background: rgba(124,138,255,0.06);
+    border: 1px solid rgba(124,138,255,0.1);
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .bar-active-label:hover {
+    color: rgba(124,138,255,0.8);
+    background: rgba(124,138,255,0.12);
+    border-color: rgba(124,138,255,0.25);
+  }
+
+  .session-picker-backdrop {
+    position: fixed; inset: 0; z-index: 10025;
+  }
+  .session-picker {
+    position: absolute;
+    bottom: calc(100% + 8px); left: 0;
+    z-index: 10030;
+    background: rgba(18, 18, 30, 0.95);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    backdrop-filter: blur(20px);
+    box-shadow: 0 12px 48px rgba(0,0,0,0.5);
+    padding: 10px 0;
+    min-width: 260px;
+    animation: fadein 0.12s ease-out;
+  }
+  .sp-title {
+    padding: 4px 14px 8px;
+    font-size: 9px; font-weight: 700; letter-spacing: 1px;
+    text-transform: uppercase;
+    color: rgba(124,138,255,0.5);
+  }
+  .sp-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 7px 14px;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .sp-item:hover { background: rgba(255,255,255,0.04); }
+  .sp-item.active { background: rgba(124,138,255,0.08); }
+  .sp-name {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px;
+    color: rgba(255,255,255,0.7);
+    flex: 1;
+  }
+  .sp-item.active .sp-name { color: rgba(124,138,255,0.9); font-weight: 600; }
+  .sp-id {
+    font-size: 9px; color: rgba(255,255,255,0.2);
+    font-weight: 400;
+  }
+  .sp-dot { font-size: 7px; }
+  .sp-dot.on { color: #28c840; }
+  .sp-dot.off { color: #ff5f57; }
+  .sp-kill {
+    font-size: 12px; color: rgba(255,95,87,0.4);
+    cursor: pointer; padding: 2px 6px; border-radius: 4px;
+    transition: all 0.12s; line-height: 1;
+  }
+  .sp-kill:hover {
+    color: rgba(255,95,87,0.9);
+    background: rgba(255,95,87,0.1);
+  }
+  .sp-divider {
+    height: 1px; margin: 5px 10px;
+    background: rgba(255,255,255,0.06);
+  }
+  .sp-new .sp-name {
+    color: rgba(80,200,120,0.6);
+    font-weight: 600;
+  }
+  .sp-new:hover .sp-name { color: rgba(80,200,120,0.9); }
 
   /* ═══════════════ workspace menu ═══════════════ */
   .ws-menu-backdrop {

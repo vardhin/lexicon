@@ -5,7 +5,26 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$PROJECT_ROOT/lexicon-backend"
 FRONTEND_DIR="$PROJECT_ROOT/lexicon-frontend"
+SHELL_DIR="$PROJECT_ROOT/lexicon-shell"
 
+# ── Shell Microservice ──
+echo "🐚 Starting Shell Microservice..."
+lsof -ti:8765 | xargs kill -9 2>/dev/null || true
+
+# Setup venv if needed
+if [ ! -d "$SHELL_DIR/.venv" ]; then
+    cd "$SHELL_DIR"
+    uv venv .venv
+    uv pip install websockets --python .venv/bin/python
+fi
+
+cd "$SHELL_DIR"
+.venv/bin/python shell_server.py &
+SHELL_PID=$!
+echo "   Shell service running (PID: $SHELL_PID)"
+sleep 0.5
+
+# ── Backend ──
 echo "🧠 Starting Lexicon Backend..."
 cd "$BACKEND_DIR"
 
@@ -43,7 +62,7 @@ fi
 TAURI_PID=$!
 
 # Cleanup on exit
-trap "echo ''; echo 'Shutting down...'; kill $BACKEND_PID $TAURI_PID 2>/dev/null; exit" INT TERM EXIT
+trap "echo ''; echo 'Shutting down...'; kill $SHELL_PID $BACKEND_PID $TAURI_PID 2>/dev/null; exit" INT TERM EXIT
 
 # Wait for user interrupt
 wait

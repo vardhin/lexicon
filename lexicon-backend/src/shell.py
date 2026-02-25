@@ -1,246 +1,205 @@
 """
-Persistent Shell — a long-running zsh session per WebSocket connection.
+Shell Manager — manages multiple PTY sessions via the Shell Microservice.
 
-Instead of spawning a new process per command, we keep a single zsh
-process alive.  Commands are written to stdin, and a unique sentinel
-marker after each command lets us know when output is complete and
-what the exit code was.
+Each session gets its own WebSocket connection to the Shell Microservice
+(ws://127.0.0.1:8765), providing independent PTY sessions.
 
-This means:
-  - `cd` persists between commands
-  - environment changes (`export`, `z`, `nvm use`, etc.) stick
-  - we can kill a running command with SIGINT (Ctrl+C)
+The Brain routes messages between the frontend and sessions by session_id:
 
-Interactive / TUI programs (btop, vim, htop, etc.) are detected and
-rejected with a helpful message — they need a real terminal that a
-WebSocket overlay can't provide.
+  Frontend:  { type: "shell_spawn",  session_id: "s-abc123", cols: 120, rows: 30 }
+  Frontend:  { type: "shell_input",  session_id: "s-abc123", data: "ls\r" }
+  Backend ->: { type: "SHELL_OUTPUT", session_id: "s-abc123", data: "..." }
+
+Multiple terminal widgets on the canvas each correspond to one session.
 """
 
 import asyncio
-import os
-import signal
-import uuid
+import json
 
-# Programs that require a real PTY / TUI — we can't render them.
-_TUI_PROGRAMS = frozenset({
-    "btop", "htop", "top", "vim", "nvim", "vi", "nano", "micro", "helix",
-    "less", "more", "man", "fzf", "ranger", "nnn", "lf", "mc",
-    "tmux", "screen", "ssh", "telnet", "nload", "iftop", "bmon",
-    "watch", "dialog", "whiptail", "ncdu", "cfdisk", "nmtui",
-})
+import websockets.asyncio.client
 
-# Unique sentinel we echo after every command to detect completion.
-_SENTINEL = "__LEXICON_DONE__"
+SHELL_SERVICE_URL = "ws://127.0.0.1:8765"
 
 
-class PersistentShell:
-    """A single zsh process that lives for the lifetime of a WS connection."""
+class _Session:
+    """A single PTY session connected to the Shell Microservice."""
 
-    def __init__(self):
-        self.proc = None
-        self._current_shell_id = None
-        self._lock = asyncio.Lock()
-        self._cwd = os.environ.get("HOME", "/home/vardhin")
+    def __init__(self, session_id: str, frontend_ws):
+        self.session_id = session_id
+        self._shell_ws = None
+        self._reader_task: asyncio.Task | None = None
+        self._frontend_ws = frontend_ws
+        self._connected = False
+        self._shell_info: dict | None = None
 
-    async def start(self):
-        """Spawn the zsh process."""
-        env = {**os.environ, "TERM": "dumb"}
-        self.proc = await asyncio.create_subprocess_exec(
-            "/usr/bin/zsh", "--login", "--no-rcs",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env,
-            cwd=self._cwd,
-            # Create a new process group so we can signal just the child tree
-            preexec_fn=os.setsid,
-        )
-        # Source the user's profile for PATH, aliases, etc. but skip
-        # interactive-only stuff by using --no-rcs above and sourcing manually.
-        # We source .zshenv (always) and .zprofile (login) but NOT .zshrc
-        # (which has fastfetch and other interactive junk).
-        init_cmds = [
-            '[ -f "$HOME/.zshenv" ] && source "$HOME/.zshenv" 2>/dev/null',
-            '[ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile" 2>/dev/null',
-            # Source just the non-interactive parts of .zshrc:
-            # aliases, PATH additions, plugin inits — but skip anything
-            # that produces output. We use a trick: set a flag and let
-            # .zshrc check it to skip greetings.
-            'export LEXICON_SHELL=1',
-            # Source .zshrc but suppress its output
-            '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc" &>/dev/null',
-            f'echo "{_SENTINEL} 0"',
-        ]
-        full_init = "\n".join(init_cmds) + "\n"
-        self.proc.stdin.write(full_init.encode())
-        await self.proc.stdin.drain()
+    async def connect(self, cols: int = 120, rows: int = 30):
+        """Connect to the Shell Microservice and spawn a PTY."""
+        try:
+            self._shell_ws = await websockets.asyncio.client.connect(
+                SHELL_SERVICE_URL,
+                max_size=2**20,
+            )
+            self._connected = True
 
-        # Wait for the init sentinel
-        while True:
-            line = await self.proc.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace")
-            if _SENTINEL in text:
-                break
+            # Read the initial shell_info message
+            raw = await asyncio.wait_for(self._shell_ws.recv(), timeout=5)
+            msg = json.loads(raw)
+            if msg.get("type") == "shell_info":
+                self._shell_info = msg
 
-    async def run_command(self, ws, shell_id: str, cmd: str, memory):
-        """Execute a command in the persistent shell, streaming output."""
-        if not self.proc or self.proc.returncode is not None:
-            await self.start()
+            # Request a shell session with the desired size
+            await self._shell_ws.send(json.dumps({
+                "type": "spawn",
+                "cols": cols,
+                "rows": rows,
+            }))
 
-        # Check for TUI programs
-        first_word = cmd.strip().split()[0] if cmd.strip() else ""
-        # Handle pipes/sudo: check last piped command too
-        pipe_parts = cmd.split("|")
-        all_words = [p.strip().split()[0] for p in pipe_parts if p.strip()]
-        # Also handle sudo prefix
-        check_words = []
-        for w in all_words:
-            check_words.append(w)
-        for part in pipe_parts:
-            tokens = part.strip().split()
-            if len(tokens) >= 2 and tokens[0] == "sudo":
-                check_words.append(tokens[1])
+            # Wait for spawned confirmation
+            raw = await asyncio.wait_for(self._shell_ws.recv(), timeout=5)
+            spawn_msg = json.loads(raw)
 
-        for w in check_words:
-            if w in _TUI_PROGRAMS:
-                await ws.send_json({
-                    "type": "SHELL_OUTPUT",
-                    "shell_id": shell_id,
-                    "text": f"⚠ '{w}' is a TUI/interactive program that needs a real terminal.\n"
-                            f"  Run it in Kitty/Alacritty instead, or use a non-interactive alternative.\n",
-                })
-                await ws.send_json({
-                    "type": "SHELL_DONE",
-                    "shell_id": shell_id,
-                    "exit_code": 1,
-                })
-                return
+            # Notify the frontend
+            await self._frontend_ws.send_json({
+                "type": "SHELL_SPAWNED",
+                "session_id": self.session_id,
+                "shell": self._shell_info.get("shell", "unknown") if self._shell_info else "unknown",
+                "pid": spawn_msg.get("pid", 0),
+                "user": self._shell_info.get("user", "") if self._shell_info else "",
+                "home": self._shell_info.get("home", "") if self._shell_info else "",
+            })
 
-        async with self._lock:
-            self._current_shell_id = shell_id
-            collected = []
+            # Start the reader loop
+            self._reader_task = asyncio.create_task(self._relay_output())
 
-            try:
-                # Write the command followed by our sentinel
-                # The sentinel echoes the exit code of the previous command
-                script = f'{cmd}\necho "{_SENTINEL} $?"\n'
-                self.proc.stdin.write(script.encode())
-                await self.proc.stdin.drain()
+        except Exception as e:
+            self._connected = False
+            await self._frontend_ws.send_json({
+                "type": "SHELL_ERROR",
+                "session_id": self.session_id,
+                "message": f"Failed to connect to shell service: {e}",
+            })
 
-                # Read output until we see the sentinel
-                while True:
-                    try:
-                        line = await asyncio.wait_for(
-                            self.proc.stdout.readline(), timeout=60
-                        )
-                    except asyncio.TimeoutError:
-                        await ws.send_json({
-                            "type": "SHELL_OUTPUT",
-                            "shell_id": shell_id,
-                            "text": "⚠ Command timed out after 60s\n",
-                        })
-                        # Kill the current command
-                        await self.kill_current()
-                        await ws.send_json({
-                            "type": "SHELL_DONE",
-                            "shell_id": shell_id,
-                            "exit_code": 124,
-                        })
-                        await memory.save_shell_session(
-                            shell_id, cmd, "".join(collected) + "\n⚠ Timed out\n", 124
-                        )
-                        return
+    async def _relay_output(self):
+        """Read from Shell Microservice and forward to Frontend with session_id."""
+        try:
+            async for raw in self._shell_ws:
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
 
-                    if not line:
-                        # Process died
-                        await ws.send_json({
-                            "type": "SHELL_DONE",
-                            "shell_id": shell_id,
-                            "exit_code": -1,
-                        })
-                        await memory.save_shell_session(
-                            shell_id, cmd, "".join(collected), -1
-                        )
-                        return
-
-                    text = line.decode("utf-8", errors="replace")
-
-                    # Check for sentinel
-                    if _SENTINEL in text:
-                        # Parse exit code from sentinel line
-                        try:
-                            exit_code = int(text.strip().split()[-1])
-                        except (ValueError, IndexError):
-                            exit_code = 0
-
-                        await ws.send_json({
-                            "type": "SHELL_DONE",
-                            "shell_id": shell_id,
-                            "exit_code": exit_code,
-                        })
-
-                        # Persist
-                        full_output = "".join(collected)
-                        if len(full_output) > 65536:
-                            full_output = full_output[:65536] + "\n… (truncated)\n"
-                        await memory.save_shell_session(
-                            shell_id, cmd, full_output, exit_code
-                        )
-                        return
-
-                    collected.append(text)
-                    await ws.send_json({
+                if msg["type"] == "output":
+                    await self._frontend_ws.send_json({
                         "type": "SHELL_OUTPUT",
-                        "shell_id": shell_id,
-                        "text": text,
+                        "session_id": self.session_id,
+                        "data": msg["data"],
                     })
-
-            except Exception as e:
-                await ws.send_json({
-                    "type": "SHELL_OUTPUT",
-                    "shell_id": shell_id,
-                    "text": f"Error: {e}\n",
-                })
-                await ws.send_json({
-                    "type": "SHELL_DONE",
-                    "shell_id": shell_id,
+                elif msg["type"] == "exited":
+                    await self._frontend_ws.send_json({
+                        "type": "SHELL_EXITED",
+                        "session_id": self.session_id,
+                        "exit_code": msg.get("exit_code", -1),
+                    })
+                    self._connected = False
+                    break
+        except Exception:
+            self._connected = False
+            try:
+                await self._frontend_ws.send_json({
+                    "type": "SHELL_EXITED",
+                    "session_id": self.session_id,
                     "exit_code": -1,
                 })
-            finally:
-                self._current_shell_id = None
-
-    async def kill_current(self):
-        """Send SIGINT to the shell's process group (like Ctrl+C)."""
-        if self.proc and self.proc.returncode is None:
-            try:
-                # Send SIGINT to the entire process group
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGINT)
-            except (ProcessLookupError, PermissionError):
+            except Exception:
                 pass
 
-    async def get_cwd(self):
-        """Ask the shell for its current working directory."""
-        if not self.proc or self.proc.returncode is not None:
-            return self._cwd
-        # We can't easily query this without running a command,
-        # so we return the initial cwd. The actual cwd changes
-        # are visible via `pwd` command.
-        return self._cwd
+    async def send_input(self, data: str):
+        if self._shell_ws and self._connected:
+            try:
+                await self._shell_ws.send(json.dumps({"type": "input", "data": data}))
+            except Exception:
+                pass
+
+    async def resize(self, cols: int, rows: int):
+        if self._shell_ws and self._connected:
+            try:
+                await self._shell_ws.send(json.dumps({
+                    "type": "resize", "cols": cols, "rows": rows,
+                }))
+            except Exception:
+                pass
+
+    async def send_signal(self, sig: str = "INT"):
+        if self._shell_ws and self._connected:
+            try:
+                await self._shell_ws.send(json.dumps({"type": "signal", "sig": sig}))
+            except Exception:
+                pass
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
 
     async def close(self):
-        """Shut down the shell process."""
-        if self.proc and self.proc.returncode is None:
+        self._connected = False
+        if self._reader_task:
+            self._reader_task.cancel()
             try:
-                self.proc.stdin.write(b"exit\n")
-                await self.proc.stdin.drain()
-                try:
-                    await asyncio.wait_for(self.proc.wait(), timeout=3)
-                except asyncio.TimeoutError:
-                    self.proc.kill()
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        if self._shell_ws:
+            try:
+                await self._shell_ws.send(json.dumps({"type": "kill"}))
             except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
+                pass
+            try:
+                await self._shell_ws.close()
+            except Exception:
+                pass
+            self._shell_ws = None
+
+
+class ShellManager:
+    """Manages multiple named PTY sessions for a single frontend connection."""
+
+    def __init__(self):
+        self._sessions: dict[str, _Session] = {}
+
+    async def spawn(self, session_id: str, frontend_ws, cols: int = 120, rows: int = 30):
+        """Spawn a new session or reconnect an existing one."""
+        # Close existing session with same id if it exists
+        if session_id in self._sessions:
+            await self._sessions[session_id].close()
+
+        session = _Session(session_id, frontend_ws)
+        self._sessions[session_id] = session
+        await session.connect(cols, rows)
+
+    async def send_input(self, session_id: str, data: str):
+        session = self._sessions.get(session_id)
+        if session and session.is_connected:
+            await session.send_input(data)
+
+    async def resize(self, session_id: str, cols: int, rows: int):
+        session = self._sessions.get(session_id)
+        if session and session.is_connected:
+            await session.resize(cols, rows)
+
+    async def send_signal(self, session_id: str, sig: str = "INT"):
+        session = self._sessions.get(session_id)
+        if session and session.is_connected:
+            await session.send_signal(sig)
+
+    async def kill(self, session_id: str):
+        session = self._sessions.pop(session_id, None)
+        if session:
+            await session.close()
+
+    def is_connected(self, session_id: str) -> bool:
+        session = self._sessions.get(session_id)
+        return session.is_connected if session else False
+
+    async def close_all(self):
+        for sid in list(self._sessions.keys()):
+            await self.kill(sid)

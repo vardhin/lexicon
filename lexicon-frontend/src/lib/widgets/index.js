@@ -16,6 +16,7 @@ import CalculatorWidget from './CalculatorWidget.svelte';
 import SysMonWidget from './SysMonWidget.svelte';
 import WeatherWidget from './WeatherWidget.svelte';
 import HelpWidget from './HelpWidget.svelte';
+import TerminalWidget from './TerminalWidget.svelte';
 
 const registry = {
   clock: ClockWidget,
@@ -26,6 +27,7 @@ const registry = {
   sysmon: SysMonWidget,
   weather: WeatherWidget,
   help: HelpWidget,
+  terminal: TerminalWidget,
 };
 
 export default registry;
