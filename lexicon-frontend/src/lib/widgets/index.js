@@ -18,6 +18,7 @@ import WeatherWidget from './WeatherWidget.svelte';
 import HelpWidget from './HelpWidget.svelte';
 import TerminalWidget from './TerminalWidget.svelte';
 import WhatsAppWidget from './WhatsAppWidget.svelte';
+import WADebugWidget from './WADebugWidget.svelte';
 
 const registry = {
   clock: ClockWidget,
@@ -30,6 +31,7 @@ const registry = {
   help: HelpWidget,
   terminal: TerminalWidget,
   whatsapp: WhatsAppWidget,
+  wadebug: WADebugWidget,
 };
 
 export default registry;

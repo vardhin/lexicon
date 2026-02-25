@@ -263,6 +263,76 @@ async def whatsapp_get_status():
     return _whatsapp_status
 
 
+@app.post("/whatsapp/hide")
+async def whatsapp_hide():
+    """Hide the WhatsApp organ overlay. Called from injected JS via HTTP."""
+    await manager.broadcast({"type": "WHATSAPP_HIDE"})
+    return {"status": "hidden"}
+
+
+# ── WhatsApp DOM debug ──
+
+_whatsapp_debug: dict = {"snapshot": None, "scan_report": None, "selector_cache": {}}
+
+
+@app.post("/whatsapp/debug")
+async def whatsapp_debug_post(request: Request):
+    """Receive a DOM debug snapshot from the WhatsApp monitor JS."""
+    data = await request.json()
+    _whatsapp_debug["snapshot"] = data.get("snapshot")
+    _whatsapp_debug["scan_report"] = data.get("scan_report")
+    return {"status": "ok"}
+
+
+@app.get("/whatsapp/debug")
+async def whatsapp_debug_get():
+    """Get the latest DOM debug snapshot."""
+    return {
+        "snapshot": _whatsapp_debug.get("snapshot"),
+        "scan_report": _whatsapp_debug.get("scan_report"),
+    }
+
+
+@app.post("/whatsapp/debug/query")
+async def whatsapp_debug_query(request: Request):
+    """Send a CSS selector query to the WhatsApp organ. The organ evaluates it
+    against its live DOM and sends the result back via POST /whatsapp/debug/query/result."""
+    data = await request.json()
+    selector = data.get("selector", "")
+    # Store the pending query — the monitor JS polls for it
+    _whatsapp_debug["pending_query"] = selector
+    _whatsapp_debug["query_results"] = None
+
+    # Wait briefly for results (the monitor checks every second)
+    import asyncio
+    for _ in range(15):  # 1.5s max wait
+        await asyncio.sleep(0.1)
+        if _whatsapp_debug.get("query_results") is not None:
+            results = _whatsapp_debug["query_results"]
+            _whatsapp_debug["query_results"] = None
+            return results
+
+    return {"count": 0, "results": [], "error": "timeout"}
+
+
+@app.get("/whatsapp/debug/pending")
+async def whatsapp_debug_pending():
+    """Get any pending CSS selector query for the monitor to evaluate."""
+    q = _whatsapp_debug.get("pending_query")
+    if q:
+        _whatsapp_debug["pending_query"] = None
+        return {"selector": q}
+    return {"selector": None}
+
+
+@app.post("/whatsapp/debug/query/result")
+async def whatsapp_debug_query_result(request: Request):
+    """Receive CSS selector query results from the monitor JS."""
+    data = await request.json()
+    _whatsapp_debug["query_results"] = data
+    return {"status": "ok"}
+
+
 @app.get("/whatsapp/contacts")
 async def whatsapp_contacts():
     """Get all known WhatsApp contacts."""

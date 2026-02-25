@@ -1,19 +1,15 @@
 <!--
-  WhatsAppWidget.svelte — WhatsApp dashboard + organ tab controls.
+  WhatsAppWidget.svelte — WhatsApp dashboard widget.
 
-  The WhatsApp "organ" is a real web.whatsapp.com tab in a separate
-  Tauri WebviewWindow. It is NOT headless — you can switch to it at any
-  time to log in (QR scan), browse full chats, etc.
+  The WhatsApp "organ" is a real web.whatsapp.com in a fullscreen child
+  webview overlay. You toggle it via the sidebar 💬 button or from this
+  widget's controls.
 
   This widget shows:
     - Organ status (closed / background / visible)
-    - "Open WhatsApp" button → switches to the WhatsApp tab
-    - Recent messages received from the organ's injection script
-    - Contact list with message counts
-
-  Think of this widget as the WhatsApp "dashboard" on your canvas,
-  while the real WhatsApp tab is a separate fullscreen view you can
-  switch to and from.
+    - Controls to open/hide/close the WhatsApp overlay
+    - Recent chats grouped by conversation name
+    - Message view for a selected chat
 -->
 <script>
   import { onMount, onDestroy } from 'svelte';
@@ -25,18 +21,19 @@
   let organStatus = 'closed';   // 'closed' | 'background' | 'visible'
   let monitorStatus = 'unknown'; // 'connected' | 'waiting_for_qr' | 'disconnected'
   let chats = [];
-  let contacts = [];
   let messages = [];
-  let selectedContact = props?.filter_contact || null;
-  let view = selectedContact ? 'messages' : 'chats';
+  let selectedChat = props?.filter_contact || null;
+  let view = selectedChat ? 'messages' : 'chats';
   let loading = true;
   let tauriInvoke = null;
+  let organPollTimer = null;
 
   if (typeof window !== 'undefined') {
     import('@tauri-apps/api/core').then(mod => {
       tauriInvoke = mod.invoke;
-      // Poll organ status on load
       pollOrganStatus();
+      // Poll organ status every 2 seconds to keep in sync
+      organPollTimer = setInterval(pollOrganStatus, 2000);
     }).catch(() => {});
   }
 
@@ -51,12 +48,11 @@
     // Request initial data from Brain
     if (ws && ws.isOpen()) {
       ws.send({ type: 'whatsapp_get_chats', limit: 30 });
-      if (selectedContact) {
-        ws.send({ type: 'whatsapp_get_messages', contact: selectedContact, limit: 50 });
+      if (selectedChat) {
+        ws.send({ type: 'whatsapp_get_messages', contact: selectedChat, limit: 50 });
       }
     }
 
-    // Fetch Brain-side monitor status
     fetchMonitorStatus();
   });
 
@@ -66,38 +62,39 @@
         fn => fn !== onWaMessage
       );
     }
+    if (organPollTimer) clearInterval(organPollTimer);
   });
 
   function onWaMessage(msg) {
     if (msg.type === 'WHATSAPP_CHATS') {
       chats = msg.chats || [];
-      contacts = msg.contacts || [];
       monitorStatus = msg.organ_status || monitorStatus;
       loading = false;
     }
     else if (msg.type === 'WHATSAPP_MESSAGES') {
-      if (msg.contact === selectedContact || !selectedContact) {
+      if (msg.contact === selectedChat || !selectedChat) {
         messages = msg.messages || [];
       }
       loading = false;
     }
     else if (msg.type === 'WHATSAPP_BATCH') {
-      // ── Batch update: apply all messages at once, one Svelte re-render ──
       var batchMsgs = msg.messages || [];
       if (batchMsgs.length === 0) return;
 
-      // Build a new chats array with all updates applied
+      // Group by chat (conversation name), not contact (sender)
       var chatsCopy = chats.slice();
       var newMessages = [];
       for (var b = 0; b < batchMsgs.length; b++) {
         var m = batchMsgs[b];
+        var chatKey = m.chat || m.contact;
         var found = false;
         for (var c = 0; c < chatsCopy.length; c++) {
-          if (chatsCopy[c].contact === m.contact) {
+          if (chatsCopy[c].chat === chatKey) {
             chatsCopy[c] = Object.assign({}, chatsCopy[c], {
               text: m.text,
               timestamp: m.timestamp,
-              unread_count: m.unread_count || 0,
+              contact: m.contact,
+              unread_count: m.unread_count || chatsCopy[c].unread_count || 0,
             });
             found = true;
             break;
@@ -105,27 +102,24 @@
         }
         if (!found) {
           chatsCopy.unshift({
+            chat: chatKey,
             contact: m.contact,
-            chat: m.chat,
             text: m.text,
             timestamp: m.timestamp,
             message_id: m.message_id,
             unread_count: m.unread_count || 0,
           });
         }
-        // Accumulate messages for the selected contact view
-        if (view === 'messages' && (!selectedContact || selectedContact === m.contact)) {
+        if (view === 'messages' && (!selectedChat || selectedChat === chatKey)) {
           newMessages.push({
+            chat: chatKey,
             contact: m.contact,
-            chat: m.chat,
             text: m.text,
             timestamp: m.timestamp,
             message_id: m.message_id,
-            unread_count: m.unread_count || 0,
           });
         }
       }
-      // Single reactive assignment — one re-render
       chats = chatsCopy;
       if (newMessages.length > 0) {
         messages = messages.concat(newMessages);
@@ -133,10 +127,10 @@
       loading = false;
     }
     else if (msg.type === 'WHATSAPP_MESSAGE') {
-      // Single message (legacy / from the single endpoint)
+      var chatKey = msg.chat || msg.contact;
       var newMsg = {
+        chat: chatKey,
         contact: msg.contact,
-        chat: msg.chat,
         text: msg.text,
         timestamp: msg.timestamp,
         message_id: msg.message_id,
@@ -144,21 +138,24 @@
       };
       var found = false;
       chats = chats.map(function (c) {
-        if (c.contact === msg.contact) {
+        if (c.chat === chatKey) {
           found = true;
-          return Object.assign({}, c, { text: msg.text, timestamp: msg.timestamp, unread_count: msg.unread_count || 0 });
+          return Object.assign({}, c, { text: msg.text, timestamp: msg.timestamp, contact: msg.contact, unread_count: msg.unread_count || 0 });
         }
         return c;
       });
       if (!found) {
         chats = [newMsg].concat(chats);
       }
-      if (view === 'messages' && (!selectedContact || selectedContact === msg.contact)) {
+      if (view === 'messages' && (!selectedChat || selectedChat === chatKey)) {
         messages = messages.concat([newMsg]);
       }
     }
     else if (msg.type === 'WHATSAPP_STATUS') {
       monitorStatus = msg.status;
+    }
+    else if (msg.type === 'WHATSAPP_ORGAN_STATUS') {
+      organStatus = msg.status;
     }
   }
 
@@ -172,31 +169,28 @@
   function pollOrganStatus() {
     if (!tauriInvoke) return;
     tauriInvoke('whatsapp_organ_status').then(status => {
-      organStatus = status; // "closed" | "background" | "visible"
+      organStatus = status;
     }).catch(() => {});
   }
 
-  // ── Tab switching ──
+  // ── Organ controls ──
 
-  /** Open or switch to the WhatsApp tab (real web.whatsapp.com) */
   function openWhatsAppTab() {
     if (!tauriInvoke) return;
     tauriInvoke('open_whatsapp_organ').then(() => {
-      organStatus = 'visible';
+      organStatus = 'running';
     }).catch(err => {
-      console.error('Failed to open WhatsApp tab:', err);
+      console.error('Failed to open WhatsApp:', err);
     });
   }
 
-  /** Hide WhatsApp tab (sends it to background, keeps it running) */
-  function hideWhatsAppTab() {
+  function bringToFront() {
     if (!tauriInvoke) return;
-    tauriInvoke('show_whatsapp_organ', { visible: false }).then(() => {
-      organStatus = 'background';
+    tauriInvoke('show_whatsapp_organ', { visible: true }).then(() => {
+      organStatus = 'running';
     }).catch(() => {});
   }
 
-  /** Close the WhatsApp tab entirely (kills the webview) */
   function closeWhatsAppTab() {
     if (!tauriInvoke) return;
     tauriInvoke('close_whatsapp_organ').then(() => {
@@ -205,17 +199,17 @@
     }).catch(() => {});
   }
 
-  function selectContact(contact) {
-    selectedContact = contact;
+  function selectChat(chatName) {
+    selectedChat = chatName;
     view = 'messages';
     loading = true;
     if (ws && ws.isOpen()) {
-      ws.send({ type: 'whatsapp_get_messages', contact: contact, limit: 50 });
+      ws.send({ type: 'whatsapp_get_messages', contact: chatName, limit: 50 });
     }
   }
 
   function backToChats() {
-    selectedContact = null;
+    selectedChat = null;
     view = 'chats';
     messages = [];
   }
@@ -235,14 +229,12 @@
   }
 
   function organStatusColor(s) {
-    if (s === 'visible') return '#7c8aff';
-    if (s === 'background') return '#28c840';
+    if (s === 'running') return '#28c840';
     return '#ff5f57';
   }
 
   function organStatusLabel(s) {
-    if (s === 'visible') return 'Active Tab';
-    if (s === 'background') return 'Running';
+    if (s === 'running') return 'Running';
     return 'Not Started';
   }
 
@@ -266,9 +258,9 @@
 
   <!-- Header -->
   <div class="wa-header">
-    {#if view === 'messages' && selectedContact}
+    {#if view === 'messages' && selectedChat}
       <span class="wa-back" on:click={backToChats}>←</span>
-      <span class="wa-title">{selectedContact}</span>
+      <span class="wa-title">{selectedChat}</span>
     {:else}
       <span class="wa-icon">💬</span>
       <span class="wa-title">WhatsApp</span>
@@ -287,23 +279,13 @@
   <!-- Tab control bar -->
   <div class="wa-tab-bar">
     {#if organStatus === 'closed'}
-      <!-- Not started yet — prominent "Open WhatsApp" button -->
       <button class="wa-tab-btn primary" on:click={openWhatsAppTab}>
-        💬 Open WhatsApp Tab
+        💬 Open WhatsApp
       </button>
-      <span class="wa-tab-hint">Opens web.whatsapp.com — log in with QR code</span>
-    {:else if organStatus === 'background'}
-      <!-- Running in background -->
-      <button class="wa-tab-btn primary" on:click={openWhatsAppTab}>
-        ↗ Switch to WhatsApp
-      </button>
-      <button class="wa-tab-btn danger" on:click={closeWhatsAppTab}>
-        ✕ Close
-      </button>
+      <span class="wa-tab-hint">Opens web.whatsapp.com in a separate window</span>
     {:else}
-      <!-- Currently viewing WhatsApp tab -->
-      <button class="wa-tab-btn" on:click={hideWhatsAppTab}>
-        ← Back to Lexicon
+      <button class="wa-tab-btn primary" on:click={bringToFront}>
+        ↗ Bring to Front
       </button>
       <button class="wa-tab-btn danger" on:click={closeWhatsAppTab}>
         ✕ Close
@@ -313,7 +295,7 @@
 
   {#if organStatus !== 'closed' && monitorStatus === 'waiting_for_qr'}
     <div class="wa-qr-bar">
-      ⚠ Switch to the WhatsApp tab and scan the QR code to log in
+      ⚠ Switch to the WhatsApp window and scan the QR code to log in
     </div>
   {/if}
 
@@ -337,16 +319,21 @@
         <div class="wa-empty">No messages yet</div>
       {:else}
         {#each chats as chat}
-          <div class="wa-chat-item" on:click={() => selectContact(chat.contact)}>
-            <div class="wa-avatar">{chat.contact.charAt(0).toUpperCase()}</div>
+          <div class="wa-chat-item" on:click={() => selectChat(chat.chat)}>
+            <div class="wa-avatar">{(chat.chat || '?').charAt(0).toUpperCase()}</div>
             <div class="wa-chat-info">
               <div class="wa-chat-name">
-                {chat.contact}
+                {chat.chat}
                 {#if chat.unread_count > 0}
                   <span class="wa-unread-badge">{chat.unread_count}</span>
                 {/if}
               </div>
-              <div class="wa-chat-preview">{chat.text}</div>
+              <div class="wa-chat-preview">
+                {#if chat.contact && chat.contact !== chat.chat}
+                  <span class="wa-sender">{chat.contact}:</span>
+                {/if}
+                {chat.text || ''}
+              </div>
             </div>
             <div class="wa-chat-time">{formatTime(chat.timestamp)}</div>
           </div>
@@ -355,11 +342,14 @@
 
     {:else if view === 'messages'}
       {#if messages.length === 0}
-        <div class="wa-empty">No messages from {selectedContact}</div>
+        <div class="wa-empty">No messages from {selectedChat}</div>
       {:else}
         <div class="wa-messages">
           {#each messages as msg}
             <div class="wa-msg incoming">
+              {#if msg.contact && msg.contact !== selectedChat}
+                <div class="wa-msg-sender">{msg.contact}</div>
+              {/if}
               <div class="wa-msg-text">{msg.text}</div>
               <div class="wa-msg-time">{formatTime(msg.timestamp)}</div>
             </div>
@@ -371,7 +361,7 @@
 
   <!-- Footer -->
   <div class="wa-footer">
-    {contacts.length} contact{contacts.length !== 1 ? 's' : ''} · {chats.length} chat{chats.length !== 1 ? 's' : ''}
+    {chats.length} chat{chats.length !== 1 ? 's' : ''}
   </div>
 </div>
 
@@ -537,6 +527,10 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     margin-top: 2px;
   }
+  .wa-sender {
+    color: rgba(37,211,102,0.6);
+    font-weight: 600;
+  }
   .wa-chat-time {
     font-size: 9px; color: rgba(255,255,255,0.25);
     white-space: nowrap;
@@ -566,6 +560,11 @@
     background: rgba(37,211,102,0.08);
     border: 1px solid rgba(37,211,102,0.12);
     border-top-left-radius: 4px;
+  }
+  .wa-msg-sender {
+    font-size: 9px; font-weight: 700;
+    color: rgba(37,211,102,0.7);
+    margin-bottom: 2px;
   }
   .wa-msg-text {
     font-size: 12px; line-height: 1.5;

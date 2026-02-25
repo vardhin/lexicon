@@ -1,13 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "whatsapp-organ",
-  "description": "Capability for the WhatsApp child webview — allows IPC relay from web.whatsapp.com",
-  "local": false,
-  "remote": {
-    "urls": ["https://web.whatsapp.com/*"]
-  },
+  "description": "WhatsApp organ runs as a separate process — no special webview capabilities needed.",
   "windows": ["main"],
-  "webviews": ["whatsapp-organ"],
   "permissions": [
     "core:default"
   ]

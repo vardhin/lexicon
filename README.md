@@ -35,9 +35,10 @@ Lexicon is a multi-layer system:
 | Layer | Name | Tech | Role |
 |-------|------|------|------|
 | **0** | **The Body** | Tauri + Bun + SvelteKit | Transparent fullscreen window, IPC, WebView rendering |
+| **0+** | **Organs** | Tauri child webviews + injected JS | Real web apps (WhatsApp, etc.) embedded inside widgets, DOM scanning → batched events |
 | **1** | **The Brain** | Python + FastAPI + uv | Rule-based grammar engine, WebSocket hub, extension loader |
 | **2** | **The Spine** | ZeroMQ (pyzmq) | PUSH/PULL + PUB event bus between layers |
-| **3** | **The Memory** | SurrealDB (embedded) | Persistent graph + document storage for UI state, command history, context |
+| **3** | **The Memory** | SurrealDB (embedded) | Persistent graph + document storage for UI state, command history, WhatsApp messages, context |
 | **4** | **External Sensors** | CLI scripts, daemons *(planned)* | System monitors, ad-hoc data pushers |
 
 ### Data Flow
@@ -69,13 +70,24 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
                       →  +page.svelte handleMessage() looks up registry["clock"]
                       →  Adds entry to widgets[] render list, saves state to Memory
                       →  Svelte renders <ClockWidget> at (50, 50) with glass blur frame
+
+User opens WhatsApp   →  Sidebar 💬 button toggles WhatsAppWidget on the canvas
+                      →  Widget calls invoke("open_whatsapp_organ", { x, y, w, h })
+                      →  Rust creates a CHILD WEBVIEW loading web.whatsapp.com
+                      →  Child webview positioned to exactly overlay the widget's DOM rect
+                      →  Injected whatsapp_monitor.js scans sidebar + open chat DOM
+                      →  Messages batched (500ms) → Tauri IPC → Rust → HTTP POST /whatsapp/batch
+                      →  Brain stores in SurrealDB, broadcasts WHATSAPP_BATCH over WebSocket
+                      →  WhatsAppWidget receives batch, groups by chat name, updates UI
+                      →  Widget has two views: dashboard (chat list) or live (WhatsApp inside)
+                      →  Dismissing widget hides the webview but keeps it running in background
 ```
 
 ---
 
 ## Status
 
-> **Current phase: Layer 0 + Layer 1 + Layer 2 — core loop + Spine functional.**
+> **Current phase: Layer 0 + Layer 1 + Layer 2 + Organs — core loop + Spine + WhatsApp organ functional.**
 
 ### ✅ Implemented
 
@@ -90,8 +102,8 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Widget resizing (Layer 0)** | ✅ Complete | Corner resize handle (bottom-right) on hover. Min size 160×100. Sizes persist alongside positions. |
 | **Shell mode (Layer 0+1)** | ✅ Complete | Synapse Bar doubles as a **real zsh shell** with your full Arch env. Persistent zsh session per connection — `cd`, `z`, `export` changes stick between commands. TUI programs (`btop`, `vim`, `htop`) detected and rejected with helpful message. Ctrl+C / ^C button to kill running commands. 60s timeout. Prefix `!` or `$`, or type common commands (`ls`, `git`, `cat`, etc.) directly. Output streams line-by-line between green dividers on the canvas, auto-scrolling. Every command + full output + exit code persisted to SurrealDB and restored on reconnect. |
 | **Workspaces (Layer 0+3)** | ✅ Complete | Named workspaces stored in SurrealDB. Click ✦ logo → workspace menu: create, switch, delete workspaces. Each workspace has independent widgets, shell history, and state. 🧹 clear button wipes current workspace canvas + DB. Auto-saves on switch, auto-restores on load. |
-| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `RESTORE_SHELL`, `SHELL_OUTPUT`, `SHELL_DONE`, `WORKSPACE_INFO`, `TOGGLE_VISIBILITY`. |
-| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. Persistent shell session per connection. Connection manager with broadcast, CORS enabled. Sends `WORKSPACE_INFO` + `RESTORE_STATE` + `RESTORE_SHELL` on connect. Workspace CRUD: `create_workspace`, `switch_workspace`, `delete_workspace`, `clear_workspace`, `list_workspaces`. |
+| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `RESTORE_SHELL`, `SHELL_OUTPUT`, `SHELL_DONE`, `WORKSPACE_INFO`, `TOGGLE_VISIBILITY`, `WHATSAPP_BATCH`, `WHATSAPP_MESSAGE`, `WHATSAPP_STATUS`. |
+| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. WhatsApp endpoints: `POST /whatsapp/batch`, `POST /whatsapp/message`, `POST /whatsapp/status`, `GET /whatsapp/chats`, `GET /whatsapp/messages`, `GET /whatsapp/contacts`. Persistent shell session per connection. Connection manager with broadcast, CORS enabled. Sends `WORKSPACE_INFO` + `RESTORE_STATE` + `RESTORE_SHELL` on connect. Workspace CRUD. |
 | **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline, returns action list. Fallback feedback for unknown commands. |
 | **Extension: clock** | ✅ Complete | Matches ~7 natural language patterns ("what's the time", "show clock", etc). Returns `RENDER_WIDGET` with clock type. Frontend renders live-updating `HH:MM:SS` with gradient text. |
 | **Extension: clear** | ✅ Complete | Matches "clear", "dismiss all", "close", etc. Returns `CLEAR_WIDGETS` to wipe the render list. |
@@ -102,7 +114,8 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Extension: sysmon** | ✅ Complete | Live system monitor — "system", "show stats". CPU/RAM/disk bars with live polling from `/system` endpoint (reads `/proc`, zero dependencies). |
 | **Extension: weather** | ✅ Complete | Weather widget (demo mode) — "weather", "forecast". Time-based display placeholder. Ready for real API integration. |
 | **Extension: help** | ✅ Complete | Dynamic help guide — "help", "commands", "?". Auto-collects help metadata from all loaded extensions. Shows icons, descriptions, example commands, and usage tips. |
-| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists UI state (open widgets), command history, **full shell sessions** (cmd + output + exit code), and **named workspaces**. All data is workspace-scoped. Auto-restores widgets and shell history on reconnect. Output capped at 64KB per session. No external server needed. |
+| **WhatsApp Organ (Layer 0)** | ✅ Complete | Real `web.whatsapp.com` rendered **inside a widget** on the canvas via Tauri child webview. Injected `whatsapp_monitor.js` scans the WhatsApp DOM (sidebar contacts + open chat messages), batches them (500ms flush), relays via Tauri IPC → Rust → HTTP POST to Brain. Brain stores in SurrealDB, broadcasts `WHATSAPP_BATCH` over WebSocket. Widget shows: dashboard (chat list grouped by conversation, message preview, unread counts) or live view (actual WhatsApp rendered inside the widget frame). Child webview positioned to exactly overlay the widget's DOM rect — looks embedded. Stays logged in across toggles (hide doesn't destroy the webview). Sidebar 💬 button toggles the widget. |
+| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists UI state (open widgets), command history, **full shell sessions** (cmd + output + exit code), **named workspaces**, and **WhatsApp messages + contacts**. All data is workspace-scoped. Auto-restores widgets and shell history on reconnect. Output capped at 64KB per session. No external server needed. |
 | **ZeroMQ Spine (Layer 2)** | ✅ Complete | PUSH/PULL + PUB event bus. Brain binds PULL on `:5557` and PUB on `:5556`. External scripts PUSH commands (e.g., `lexicon/toggle`). Brain dispatches to handlers which broadcast over WebSocket to the Body. Toggle goes: ZeroMQ → Brain → WebSocket → Svelte → Rust IPC (`toggle_window`). HTTP fallback at `POST /toggle`. |
 | **Dev tooling** | ✅ Complete | `dev.sh` — builds Svelte → builds Tauri release binary → starts backend (+ Spine) + Tauri client. One command to rebuild and run everything. `lexicon-toggle` for hotkey binding. |
 
@@ -110,7 +123,7 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 
 | Component | Layer | Notes |
 |-----------|-------|-------|
-| **Hidden WebViews (Organs)** | 0 | WhatsApp, Discord, etc. via injected JS in hidden Tauri WebViews. DOM scraping → events. `src-tauri/injections/` exists but is empty. |
+| **More Organs** | 0 | Discord, Gmail, etc. — same child-webview-inside-widget pattern as WhatsApp. |
 | **CSS Morph / UI Payload push** | 0 | Backend pushing live CSS/theme changes to the overlay. Push via `lexicon/theme` Spine channel. |
 | **CLI event scripts** | 4 | Ad-hoc scripts that push events into the Spine (e.g., `lexicon push "meeting in 5min"` via ZeroMQ PUSH to `:5557`). |
 
@@ -263,7 +276,7 @@ lexicon/
 │   ├── pyproject.toml              #   uv project config
 │   ├── run.sh                      #   Start backend standalone
 │   └── src/
-│       ├── main.py                 #   FastAPI app + WebSocket + /toggle endpoint
+│       ├── main.py                 #   FastAPI app + WebSocket + WhatsApp endpoints
 │       ├── engine.py               #   Grammar engine (loads extensions/)
 │       ├── memory.py               #   SurrealDB embedded memory (Layer 3)
 │       ├── spine.py                #   ZeroMQ PUSH/PULL + PUB event bus (Layer 2)
@@ -285,14 +298,17 @@ lexicon/
 │   │           ├── CalculatorWidget.svelte
 │   │           ├── SysMonWidget.svelte
 │   │           ├── WeatherWidget.svelte
-│   │           └── HelpWidget.svelte
+│   │           ├── HelpWidget.svelte
+│   │           ├── TerminalWidget.svelte
+│   │           └── WhatsAppWidget.svelte   # WhatsApp dashboard + embedded live view
 │   └── src-tauri/
 │       ├── tauri.conf.json         #   Tauri config (transparent, borderless, always-on-top)
 │       ├── capabilities/           #   Shell + IPC permissions
-│       ├── injections/             #   (empty) Future: injected JS for hidden WebViews
+│       ├── injections/
+│       │   └── whatsapp_monitor.js #   Injected into WhatsApp child webview (DOM scanner)
 │       └── src/
 │           ├── main.rs             #   Rust entry point
-│           └── lib.rs              #   Tauri setup + toggle_window IPC command
+│           └── lib.rs              #   Tauri setup + toggle_window + WhatsApp organ IPC
 ├── infra/
 │   └── data/                       #   SurrealDB file store (gitignored, auto-created)
 └── architecture/                   # Architecture diagram (Mermaid)
@@ -309,7 +325,8 @@ lexicon/
 - [x] **Paged workspace** — scrollable multi-page canvas with sidebar navigation and dividers
 - [x] **Shell mode** — execute zsh commands directly in the Synapse Bar, streaming output on canvas
 - [x] **ZeroMQ Spine** — PUSH/PULL + PUB event bus, `lexicon-toggle` script, `POST /toggle` HTTP fallback
-- [ ] **Hidden WebViews (Organs)** — scrape WhatsApp/Discord/Gmail via injected JS
+- [x] **WhatsApp Organ** — real web.whatsapp.com inside a widget, DOM scanning, batched message relay, chat grouping
+- [ ] **More Organs** — Discord, Gmail, etc. — same child-webview-inside-widget pattern
 - [ ] **SysMon daemon** — push system metrics as events via Spine
 - [ ] **CLI tool** — `lexicon push "reminder text"` from terminal via Spine
 - [ ] **Theming** — runtime CSS morph pushed via `lexicon/theme` Spine channel

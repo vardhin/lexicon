@@ -13,6 +13,27 @@ Uses surrealkv:// (file-backed, no server needed).
 import os
 from surrealdb import AsyncSurreal
 
+
+def _sanitize_for_json(obj):
+    """Recursively convert SurrealDB types (RecordID, etc.) to JSON-safe types."""
+    if obj is None:
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    # Convert RecordID and any other non-serializable types to string
+    type_name = type(obj).__name__
+    if type_name == 'RecordID':
+        return str(obj)
+    if hasattr(obj, 'isoformat'):
+        return obj.isoformat()
+    # Check if it's a basic JSON type
+    if isinstance(obj, (str, int, float, bool)):
+        return obj
+    # Fallback: stringify unknown types
+    return str(obj)
+
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "infra", "data")
 DB_URL = f"surrealkv://{os.path.normpath(DATA_DIR)}"
 
@@ -63,7 +84,7 @@ class Memory:
             "SELECT name, created_at FROM workspace ORDER BY created_at ASC"
         )
         if result:
-            return [r["name"] for r in result]
+            return [r["name"] for r in _sanitize_for_json(result)]
         return [DEFAULT_WORKSPACE]
 
     async def create_workspace(self, name):
@@ -126,7 +147,7 @@ class Memory:
             {"ws": ws},
         )
         if result and len(result) > 0 and "widgets" in result[0]:
-            return result[0]["widgets"]
+            return _sanitize_for_json(result[0]["widgets"])
         return []
 
     async def clear_state(self):
@@ -158,7 +179,7 @@ class Memory:
             "SELECT text, ts FROM history WHERE workspace = $ws ORDER BY ts DESC LIMIT $limit",
             {"ws": ws, "limit": limit},
         )
-        return result if result else []
+        return _sanitize_for_json(result) if result else []
 
     # ── Shell Sessions ────────────────────────────────────
 
@@ -192,17 +213,9 @@ class Memory:
         )
         if not result:
             return []
-        # Convert datetime ts to ISO strings for JSON serialization
-        sessions = []
-        for row in reversed(result):
-            entry = dict(row)
-            ts = entry.get("ts")
-            if hasattr(ts, "isoformat"):
-                entry["ts"] = ts.isoformat()
-            else:
-                entry["ts"] = str(ts) if ts else None
-            sessions.append(entry)
-        return sessions
+        # Sanitize and reverse to chronological order
+        sanitized = _sanitize_for_json(result)
+        return list(reversed(sanitized))
 
     # ── WhatsApp Contacts & Messages ────────────────────
 
@@ -216,7 +229,8 @@ class Memory:
             {"name": name},
         )
         if result and len(result) > 0:
-            return str(result[0].get("id", name))
+            rid = result[0].get("id", name)
+            return str(rid)
         # Create new contact node
         await self.db.query(
             "CREATE whatsapp_contact SET name = $name, "
@@ -289,18 +303,8 @@ class Memory:
         if not result:
             return []
 
-        messages = []
-        for row in reversed(result):
-            entry = dict(row)
-            # Convert datetime fields to ISO strings
-            for key in ("received_at", "timestamp"):
-                val = entry.get(key)
-                if hasattr(val, "isoformat"):
-                    entry[key] = val.isoformat()
-                elif val:
-                    entry[key] = str(val)
-            messages.append(entry)
-        return messages
+        sanitized = _sanitize_for_json(result)
+        return list(reversed(sanitized))
 
     async def get_whatsapp_contacts(self):
         """Get all known WhatsApp contacts with their message counts."""
@@ -312,24 +316,13 @@ class Memory:
         )
         if not result:
             return []
-
-        contacts = []
-        for row in result:
-            entry = dict(row)
-            for key in ("last_seen", "first_seen"):
-                val = entry.get(key)
-                if hasattr(val, "isoformat"):
-                    entry[key] = val.isoformat()
-                elif val:
-                    entry[key] = str(val)
-            contacts.append(entry)
-        return contacts
+        return _sanitize_for_json(result)
 
     async def get_whatsapp_chats_summary(self, limit: int = 20):
-        """Get a summary of recent chats — last message per contact."""
+        """Get a summary of recent chats — last message per chat/conversation."""
         if not self.db:
             return []
-        # Get the latest message per contact
+        # Get the latest message per chat (conversation name, not sender)
         result = await self.db.query(
             "SELECT contact, chat, text, timestamp, received_at, unread_count "
             "FROM whatsapp_message "
@@ -339,20 +332,18 @@ class Memory:
         if not result:
             return []
 
-        # Deduplicate by contact — keep only the latest message
-        seen_contacts = {}
-        for row in result:
-            c = row.get("contact", "")
-            if c not in seen_contacts:
+        # Sanitize first, then deduplicate
+        sanitized = _sanitize_for_json(result)
+
+        # Deduplicate by chat (conversation name) — keep only the latest message
+        seen_chats = {}
+        for row in sanitized:
+            chat_key = row.get("chat") or row.get("contact", "")
+            if chat_key not in seen_chats:
                 entry = dict(row)
-                for key in ("received_at", "timestamp"):
-                    val = entry.get(key)
-                    if hasattr(val, "isoformat"):
-                        entry[key] = val.isoformat()
-                    elif val:
-                        entry[key] = str(val)
-                seen_contacts[c] = entry
-            if len(seen_contacts) >= limit:
+                entry["chat"] = chat_key
+                seen_chats[chat_key] = entry
+            if len(seen_chats) >= limit:
                 break
 
-        return list(seen_contacts.values())
+        return list(seen_chats.values())

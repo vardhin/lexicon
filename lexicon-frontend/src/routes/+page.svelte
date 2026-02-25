@@ -98,7 +98,15 @@
   }
 
   function refocus() {
-    setTimeout(function () { if (inputEl) inputEl.focus(); }, 50);
+    // Only refocus the synapse bar if nothing else is focused
+    // (i.e. the user clicked on the empty canvas background)
+    setTimeout(function () {
+      var active = document.activeElement;
+      // If focus is on body/root/canvas (i.e. nothing specific), grab it
+      if (active === document.body || active === null || (active && active.classList && active.classList.contains('canvas'))) {
+        if (inputEl) inputEl.focus();
+      }
+    }, 50);
   }
 
   // ── save current widget state to backend ──
@@ -439,21 +447,31 @@
   // ── WhatsApp tab toggle ──
   function toggleWhatsAppTab() {
     if (!tauriInvoke) return;
-    // Check current organ status and toggle accordingly
+    // WhatsApp runs as a separate process. Open spawns it, subsequent
+    // calls bring it to front. It's like switching to another app.
     tauriInvoke('whatsapp_organ_status').then(function (status) {
       if (status === 'closed') {
-        // Not started → open WhatsApp tab
-        tauriInvoke('open_whatsapp_organ').catch(function (err) {
-          console.error('Failed to open WhatsApp tab:', err);
+        // Not started → spawn the WhatsApp organ process
+        tauriInvoke('open_whatsapp_organ').then(function () {
+          notifyWaListeners('running');
+          showFeedback('💬 WhatsApp opening in a separate window...');
+        }).catch(function (err) {
+          showFeedback('Failed to open WhatsApp: ' + err);
         });
-      } else if (status === 'visible') {
-        // Currently viewing → hide it, come back to Lexicon
-        tauriInvoke('show_whatsapp_organ', { visible: false }).catch(function () {});
       } else {
-        // Running in background → bring it to front
-        tauriInvoke('show_whatsapp_organ', { visible: true }).catch(function () {});
+        // Already running → bring it to front
+        tauriInvoke('show_whatsapp_organ', { visible: true }).then(function () {
+          notifyWaListeners('running');
+        }).catch(function () {});
       }
     }).catch(function () {});
+  }
+
+  function notifyWaListeners(organStatus) {
+    var listeners = window.__lexicon_whatsapp_listeners || [];
+    for (var li = 0; li < listeners.length; li++) {
+      try { listeners[li]({ type: 'WHATSAPP_ORGAN_STATUS', status: organStatus }); } catch (_) {}
+    }
   }
 
   // ── input handling ──
