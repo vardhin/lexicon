@@ -182,10 +182,61 @@ async def _process_whatsapp_message(data: dict):
 
 @app.post("/whatsapp/message")
 async def whatsapp_message(request: Request):
-    """Receive a WhatsApp message from the injected DOM monitor."""
+    """Receive a single WhatsApp message from the injected DOM monitor."""
     data = await request.json()
     await _process_whatsapp_message(data)
     return {"status": "ok"}
+
+
+@app.post("/whatsapp/batch")
+async def whatsapp_batch(request: Request):
+    """Receive a BATCH of WhatsApp messages in one request.
+
+    The monitor JS collects messages for ~500ms then flushes them all at once.
+    We store them all, then broadcast a single WHATSAPP_BATCH event to frontends
+    instead of N individual WHATSAPP_MESSAGE events. This prevents stuttering.
+    """
+    batch = await request.json()
+    if not isinstance(batch, list):
+        return {"status": "error", "detail": "expected array"}
+
+    stored = []
+    for data in batch:
+        contact = data.get("contact", "Unknown")
+        chat = data.get("chat", contact)
+        text = data.get("text", "")
+        timestamp = data.get("timestamp", datetime.utcnow().isoformat())
+        message_id = data.get("message_id", f"msg-{uuid.uuid4().hex[:8]}")
+        unread_count = data.get("unread_count", 0)
+
+        # Store each message
+        await memory.store_whatsapp_message(
+            contact=contact,
+            chat=chat,
+            text=text,
+            timestamp=timestamp,
+            message_id=message_id,
+            unread_count=unread_count,
+        )
+
+        stored.append({
+            "contact": contact,
+            "chat": chat,
+            "text": text,
+            "timestamp": timestamp,
+            "message_id": message_id,
+            "unread_count": unread_count,
+        })
+
+    # Single broadcast for the whole batch
+    if stored:
+        await manager.broadcast({
+            "type": "WHATSAPP_BATCH",
+            "messages": stored,
+            "count": len(stored),
+        })
+
+    return {"status": "ok", "count": len(stored)}
 
 
 @app.post("/whatsapp/status")

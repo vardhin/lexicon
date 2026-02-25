@@ -219,15 +219,24 @@
 
     // ── WhatsApp messages → routed to WhatsAppWidget listeners ──
     else if (msg.type === 'WHATSAPP_MESSAGE' || msg.type === 'WHATSAPP_CHATS' ||
-             msg.type === 'WHATSAPP_MESSAGES' || msg.type === 'WHATSAPP_STATUS') {
+             msg.type === 'WHATSAPP_MESSAGES' || msg.type === 'WHATSAPP_STATUS' ||
+             msg.type === 'WHATSAPP_BATCH') {
       var listeners = window.__lexicon_whatsapp_listeners || [];
       for (var li = 0; li < listeners.length; li++) {
         try { listeners[li](msg); } catch (_) {}
       }
-      // If it's a new message and no whatsapp widget is open, show a toast
-      if (msg.type === 'WHATSAPP_MESSAGE') {
+      // Toast for new messages (only if no whatsapp widget open)
+      if (msg.type === 'WHATSAPP_BATCH' && msg.messages && msg.messages.length > 0) {
         var hasWaWidget = widgets.some(function (w) { return w.type === 'whatsapp'; });
         if (!hasWaWidget) {
+          var first = msg.messages[0];
+          var extra = msg.count > 1 ? ' (+' + (msg.count - 1) + ' more)' : '';
+          showFeedback('💬 ' + first.contact + ': ' + (first.text || '').substring(0, 40) + extra);
+        }
+      }
+      else if (msg.type === 'WHATSAPP_MESSAGE') {
+        var hasWaWidget2 = widgets.some(function (w) { return w.type === 'whatsapp'; });
+        if (!hasWaWidget2) {
           showFeedback('💬 ' + msg.contact + ': ' + (msg.text || '').substring(0, 50));
         }
       }

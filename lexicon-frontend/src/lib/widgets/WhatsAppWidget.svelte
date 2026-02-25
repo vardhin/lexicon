@@ -81,7 +81,59 @@
       }
       loading = false;
     }
+    else if (msg.type === 'WHATSAPP_BATCH') {
+      // ── Batch update: apply all messages at once, one Svelte re-render ──
+      var batchMsgs = msg.messages || [];
+      if (batchMsgs.length === 0) return;
+
+      // Build a new chats array with all updates applied
+      var chatsCopy = chats.slice();
+      var newMessages = [];
+      for (var b = 0; b < batchMsgs.length; b++) {
+        var m = batchMsgs[b];
+        var found = false;
+        for (var c = 0; c < chatsCopy.length; c++) {
+          if (chatsCopy[c].contact === m.contact) {
+            chatsCopy[c] = Object.assign({}, chatsCopy[c], {
+              text: m.text,
+              timestamp: m.timestamp,
+              unread_count: m.unread_count || 0,
+            });
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          chatsCopy.unshift({
+            contact: m.contact,
+            chat: m.chat,
+            text: m.text,
+            timestamp: m.timestamp,
+            message_id: m.message_id,
+            unread_count: m.unread_count || 0,
+          });
+        }
+        // Accumulate messages for the selected contact view
+        if (view === 'messages' && (!selectedContact || selectedContact === m.contact)) {
+          newMessages.push({
+            contact: m.contact,
+            chat: m.chat,
+            text: m.text,
+            timestamp: m.timestamp,
+            message_id: m.message_id,
+            unread_count: m.unread_count || 0,
+          });
+        }
+      }
+      // Single reactive assignment — one re-render
+      chats = chatsCopy;
+      if (newMessages.length > 0) {
+        messages = messages.concat(newMessages);
+      }
+      loading = false;
+    }
     else if (msg.type === 'WHATSAPP_MESSAGE') {
+      // Single message (legacy / from the single endpoint)
       var newMsg = {
         contact: msg.contact,
         chat: msg.chat,

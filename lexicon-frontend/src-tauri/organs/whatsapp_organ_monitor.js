@@ -1,23 +1,22 @@
 /**
- * WhatsApp DOM Monitor — injected into the WhatsApp organ WebView.
+ * WhatsApp Organ Monitor — injected into the standalone WebKitGTK browser.
  *
- * ARCHITECTURE: Batched message relay
- *   - DOM scans collect messages into a buffer
- *   - Buffer is flushed as a single batch every 500ms
- *   - Batch goes via Tauri IPC -> Rust -> single HTTP POST to Brain
- *   - Brain stores all at once, broadcasts once
- *   - This prevents 50+ rapid-fire events when opening a chat
+ * Unlike the Tauri version, this one:
+ *   - Uses fetch() directly to POST to Brain (no CSP issues — our own browser)
+ *   - Uses window.webkit.messageHandlers.lexicon for back-to-Lexicon
+ *   - Batches messages (500ms flush interval)
  *
  * DOM selectors (2026):
  *   - div.message-in / div.message-out — chat messages
  *   - ._ak8j — sidebar contact items
  *   - [title] — contact/group names
- *   - <span> — text content
+ *   - span — text content
  */
 
 (function () {
   'use strict';
 
+  var BRAIN = 'http://127.0.0.1:8000';
   var seenMessages = new Set();
   var seenSidebar = new Set();
   var observerStarted = false;
@@ -25,25 +24,12 @@
   var MAX_RETRIES = 180;
 
   // ── Batching ──
-  // Messages are queued here and flushed periodically.
   var messageQueue = [];
   var flushTimer = null;
-  var FLUSH_INTERVAL = 500; // ms
-
-  // ── Tauri IPC bridge ──
-
-  function tauriInvoke(cmd, args) {
-    try {
-      if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
-        return window.__TAURI_INTERNALS__.invoke(cmd, args || {});
-      }
-    } catch (e) {}
-    return Promise.reject('no tauri');
-  }
+  var FLUSH_INTERVAL = 500;
 
   function queueMessage(data) {
     messageQueue.push(data);
-    // Schedule a flush if one isn't already pending
     if (!flushTimer) {
       flushTimer = setTimeout(flushQueue, FLUSH_INTERVAL);
     }
@@ -52,44 +38,45 @@
   function flushQueue() {
     flushTimer = null;
     if (messageQueue.length === 0) return;
-
     var batch = messageQueue.slice();
     messageQueue = [];
-
-    console.log('[lexicon/wa] Flushing batch:', batch.length, 'messages');
-
-    var payload = JSON.stringify(batch);
-    tauriInvoke('wa_relay_batch', { payload: payload }).then(function () {
-      console.log('[lexicon/wa] batch relayed via IPC');
-    }).catch(function () {
-      // Fallback: HTTP
-      try {
-        fetch('http://127.0.0.1:8000/whatsapp/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: payload,
-        }).catch(function () {});
-      } catch (_) {}
+    console.log('[lexicon/wa] Flushing', batch.length, 'messages');
+    fetch(BRAIN + '/whatsapp/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(batch),
+    }).catch(function (e) {
+      console.warn('[lexicon/wa] Batch POST failed:', e);
     });
   }
 
   function relayStatus(status) {
-    tauriInvoke('wa_relay_status', { status: status }).catch(function () {
-      try {
-        fetch('http://127.0.0.1:8000/whatsapp/status', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: status, timestamp: new Date().toISOString() }),
-        }).catch(function () {});
-      } catch (_) {}
-    });
+    fetch(BRAIN + '/whatsapp/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: status, timestamp: new Date().toISOString() }),
+    }).catch(function () {});
+    // Also tell the Python host
+    try {
+      window.webkit.messageHandlers.lexicon.postMessage(
+        JSON.stringify({ action: 'status', status: status })
+      );
+    } catch (_) {}
+  }
+
+  function backToLexicon() {
+    try {
+      window.webkit.messageHandlers.lexicon.postMessage(
+        JSON.stringify({ action: 'back_to_lexicon' })
+      );
+    } catch (_) {}
   }
 
   // ── Keyboard: Escape -> back to Lexicon ──
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      tauriInvoke('show_whatsapp_organ', { visible: false }).catch(function () {});
+      backToLexicon();
     }
   }, true);
 
@@ -98,7 +85,7 @@
     if (document.getElementById('lexicon-back-btn')) return;
     var btn = document.createElement('div');
     btn.id = 'lexicon-back-btn';
-    btn.innerHTML = '\u27F5 Lexicon';
+    btn.textContent = '\u27F5 Lexicon';
     btn.style.cssText = [
       'position:fixed', 'top:12px', 'right:16px', 'z-index:999999',
       'background:rgba(10,10,20,0.85)', 'color:rgba(124,138,255,0.95)',
@@ -106,15 +93,12 @@
       'padding:6px 14px', 'border-radius:8px',
       'border:1px solid rgba(124,138,255,0.3)',
       'cursor:pointer', 'user-select:none',
-      'backdrop-filter:blur(8px)', '-webkit-backdrop-filter:blur(8px)',
-      'transition:all 0.15s ease',
+      'backdrop-filter:blur(8px)',
       'box-shadow:0 2px 12px rgba(0,0,0,0.3)',
     ].join(';');
     btn.onmouseenter = function () { btn.style.background = 'rgba(124,138,255,0.2)'; };
     btn.onmouseleave = function () { btn.style.background = 'rgba(10,10,20,0.85)'; };
-    btn.onclick = function () {
-      tauriInvoke('show_whatsapp_organ', { visible: false }).catch(function () {});
-    };
+    btn.onclick = backToLexicon;
     document.body.appendChild(btn);
   }
 
@@ -134,11 +118,6 @@
     for (var i = 0; i < spans.length; i++) {
       var t = spans[i].getAttribute('title');
       if (t && t.length > 0 && t.length < 120) return t;
-    }
-    var fb = document.querySelector('header span[title]');
-    if (fb) {
-      var ft = fb.getAttribute('title') || fb.textContent.trim();
-      if (ft && ft.length > 0 && ft.length < 120) return ft;
     }
     return null;
   }
@@ -160,7 +139,6 @@
     var msgs = document.querySelectorAll('div.message-in');
     for (var i = 0; i < msgs.length; i++) {
       var el = msgs[i];
-
       var dataId = el.getAttribute('data-id');
       if (!dataId) {
         var p = el.closest('[data-id]');
@@ -212,8 +190,6 @@
 
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
-
-      // Contact name: first [title] that isn't a timestamp
       var contact = null;
       var titles = item.querySelectorAll('[title]');
       for (var t = 0; t < titles.length; t++) {
@@ -227,7 +203,6 @@
       }
       if (!contact) continue;
 
-      // Unread count
       var unread = 0;
       var spans = item.querySelectorAll('span');
       for (var s = 0; s < spans.length; s++) {
@@ -238,7 +213,6 @@
         }
       }
 
-      // Preview: last meaningful span
       var preview = null;
       for (var j = spans.length - 1; j >= 0; j--) {
         var pt = spans[j].textContent.trim();
@@ -274,7 +248,6 @@
 
   function startObserver() {
     var app = document.getElementById('app') || document.body;
-
     new MutationObserver(function (muts) {
       var hasNew = false;
       for (var i = 0; i < muts.length; i++) {
@@ -292,12 +265,9 @@
 
     setInterval(scanSidebar, 5000);
     setInterval(scanOpenChat, 3000);
-
     scanOpenChat();
     scanSidebar();
   }
-
-  // ── Wait for WhatsApp to load ──
 
   function waitForWhatsApp() {
     if (observerStarted) return;
@@ -322,7 +292,7 @@
   }
 
   // ── Boot ──
-  console.log('[lexicon/wa] Monitor injected (batched)');
+  console.log('[lexicon/wa] Organ monitor injected (standalone)');
   ensureBackButton();
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') {

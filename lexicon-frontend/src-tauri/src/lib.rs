@@ -1,45 +1,38 @@
 use tauri::Manager;
 use tauri::WebviewUrl;
-use tauri::webview::WebviewWindowBuilder;
+use tauri::webview::WebviewBuilder;
+
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static BRAIN_URL: &str = "http://127.0.0.1:8000";
 
-/// Helper: hide one window, then show another with a small gap
-/// so the compositor doesn't fight between two fullscreen surfaces.
-fn switch_window(from: &tauri::WebviewWindow, to: &tauri::WebviewWindow) {
-    // Step 1: de-fullscreen the outgoing window
-    let _ = from.set_always_on_top(false);
-    let _ = from.set_fullscreen(false);
-    // Step 2: hide it
-    let _ = from.hide();
-    // Step 3: small delay to let the compositor release the surface
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    // Step 4: show + fullscreen the incoming window
-    let _ = to.show();
-    let _ = to.set_always_on_top(true);
-    let _ = to.set_fullscreen(true);
-    let _ = to.set_focus();
-}
+/// Track WhatsApp organ visibility ourselves since Webview has no is_visible().
+static WA_VISIBLE: AtomicBool = AtomicBool::new(false);
+/// Track whether the organ has been created.
+static WA_CREATED: AtomicBool = AtomicBool::new(false);
 
-/// Toggle main window visibility — called from frontend via IPC.
-/// Also handles the case where the WhatsApp organ is visible:
-/// if WhatsApp is showing, hide it and restore main instead.
+/// Reusable HTTP client.
+static HTTP: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .pool_max_idle_per_host(2)
+        .build()
+        .unwrap()
+});
+
+/// Toggle main window visibility — called from frontend or global hotkey.
 #[tauri::command]
 fn toggle_window(app: tauri::AppHandle) {
-    // If WhatsApp organ is visible, hide it and show main
-    if let Some(wa) = app.get_webview_window("whatsapp-organ") {
-        if wa.is_visible().unwrap_or(false) {
-            if let Some(main) = app.get_webview_window("main") {
-                switch_window(&wa, &main);
-            }
-            eprintln!("[lexicon] toggle: WhatsApp hidden → main restored");
-            return;
-        }
-    }
-
-    // Normal toggle of main window
     if let Some(window) = app.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) {
+            // Also hide the WhatsApp child webview if it's showing
+            if WA_VISIBLE.load(Ordering::Relaxed) {
+                if let Some(wa) = app.get_webview("whatsapp-organ") {
+                    let _ = wa.hide();
+                    WA_VISIBLE.store(false, Ordering::Relaxed);
+                }
+            }
             let _ = window.set_always_on_top(false);
             let _ = window.set_fullscreen(false);
             let _ = window.hide();
@@ -54,170 +47,130 @@ fn toggle_window(app: tauri::AppHandle) {
     }
 }
 
-// ── WhatsApp Organ ─────────────────────────────────────────────
+// ── WhatsApp Organ (child webview) ─────────────────────────────
 //
-// The WhatsApp organ is a real web.whatsapp.com tab running in its own
-// WebviewWindow. It is NOT headless — the user can switch to it to:
-//   - Scan the QR code and log in
-//   - Browse full chats, read messages, etc.
+// WhatsApp is a CHILD WEBVIEW inside the same main Tauri window.
+// This means: one window, one compositor surface, zero stuttering.
 //
-// When the user is on the main Lexicon canvas, the WhatsApp window is
-// hidden but still running. The injected monitor.js POSTs incoming
-// messages to the Brain (http://127.0.0.1:8000/whatsapp/message).
+// The child webview sits on top of the main Lexicon webview.
+// Toggling it is just webview.show()/hide() — no window switching.
+// It uses .auto_resize() so it always fills the window.
 //
 // Flow:
-//   sidebar 💬 / "whatsapp open" → open_whatsapp_organ()
-//                                    → creates WhatsApp window (or shows it)
-//   sidebar 💬 again / Escape      → show_whatsapp_organ(false) hides it
-//   User logs in via QR             → monitor.js starts observing DOM
-//   New message arrives              → POST to Brain → broadcast to frontend
+//   "open whatsapp" → create child webview (or show it)
+//   "back" / Escape → hide the child webview (Lexicon shows through)
+//   monitor.js      → scans DOM → batches → Tauri IPC → Rust → Brain
 //
 
-/// Create the WhatsApp organ window if it doesn't exist.
-/// If it already exists, just bring it to front.
+/// Create the WhatsApp organ webview as a child of the main window.
+/// If it already exists, just show it.
 #[tauri::command]
 fn open_whatsapp_organ(app: tauri::AppHandle) {
     // Already exists — just show it
-    if let Some(wa) = app.get_webview_window("whatsapp-organ") {
-        if let Some(main) = app.get_webview_window("main") {
-            switch_window(&main, &wa);
-        } else {
+    if WA_CREATED.load(Ordering::Relaxed) {
+        if let Some(wa) = app.get_webview("whatsapp-organ") {
             let _ = wa.show();
-            let _ = wa.set_always_on_top(true);
-            let _ = wa.set_fullscreen(true);
-            let _ = wa.set_focus();
+            WA_VISIBLE.store(true, Ordering::Relaxed);
+            eprintln!("[lexicon] WhatsApp organ shown (existing)");
+            return;
         }
-        eprintln!("[lexicon] WhatsApp organ brought to front");
-        return;
     }
 
-    // Create the WhatsApp window — do NOT set always_on_top here,
-    // we'll set it after build so the compositor doesn't fight.
+    // Get the underlying Window (not WebviewWindow) — add_child lives on Window
+    let Some(window) = app.get_window("main") else {
+        eprintln!("[lexicon] No main window found");
+        return;
+    };
+
     let injection_js = include_str!("../injections/whatsapp_monitor.js");
 
-    let builder = WebviewWindowBuilder::new(
-        &app,
+    let builder = WebviewBuilder::new(
         "whatsapp-organ",
         WebviewUrl::External("https://web.whatsapp.com".parse().unwrap()),
     )
-    .title("Lexicon — WhatsApp")
-    .inner_size(1920.0, 1080.0)
-    .decorations(false)
-    .initialization_script(injection_js);
+    .initialization_script(injection_js)
+    .auto_resize();
 
-    match builder.build() {
-        Ok(wv) => {
-            // Hide main first, then bring WhatsApp to fullscreen
-            if let Some(main) = app.get_webview_window("main") {
-                let _ = main.set_always_on_top(false);
-                let _ = main.set_fullscreen(false);
-                let _ = main.hide();
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let _ = wv.set_always_on_top(true);
-            let _ = wv.set_fullscreen(true);
-            let _ = wv.set_focus();
-            eprintln!("[lexicon] WhatsApp organ created (fullscreen)");
+    let size = window
+        .inner_size()
+        .unwrap_or(tauri::PhysicalSize::new(1920, 1080));
+
+    match window.add_child(
+        builder,
+        tauri::LogicalPosition::new(0.0, 0.0),
+        tauri::LogicalSize::new(size.width as f64, size.height as f64),
+    ) {
+        Ok(_wv) => {
+            WA_CREATED.store(true, Ordering::Relaxed);
+            WA_VISIBLE.store(true, Ordering::Relaxed);
+            eprintln!("[lexicon] WhatsApp organ created as child webview");
         }
         Err(e) => {
-            eprintln!("[lexicon] failed to create WhatsApp organ: {e}");
+            eprintln!("[lexicon] Failed to create WhatsApp organ: {e}");
         }
     }
 }
 
-/// Show or hide the WhatsApp organ window.
-/// When hiding, bring the main Lexicon window back.
+/// Show or hide the WhatsApp organ webview.
 #[tauri::command]
 fn show_whatsapp_organ(app: tauri::AppHandle, visible: bool) {
-    if let Some(wa) = app.get_webview_window("whatsapp-organ") {
+    if let Some(wa) = app.get_webview("whatsapp-organ") {
         if visible {
-            // Switch: main → WhatsApp
-            if let Some(main) = app.get_webview_window("main") {
-                switch_window(&main, &wa);
-            } else {
-                let _ = wa.show();
-                let _ = wa.set_always_on_top(true);
-                let _ = wa.set_fullscreen(true);
-                let _ = wa.set_focus();
-            }
+            let _ = wa.show();
+            WA_VISIBLE.store(true, Ordering::Relaxed);
             eprintln!("[lexicon] WhatsApp organ shown");
         } else {
-            // Switch: WhatsApp → main
-            if let Some(main) = app.get_webview_window("main") {
-                switch_window(&wa, &main);
-            } else {
-                let _ = wa.set_always_on_top(false);
-                let _ = wa.set_fullscreen(false);
-                let _ = wa.hide();
-            }
-            eprintln!("[lexicon] WhatsApp organ hidden → main restored");
+            let _ = wa.hide();
+            WA_VISIBLE.store(false, Ordering::Relaxed);
+            eprintln!("[lexicon] WhatsApp organ hidden");
         }
     }
 }
 
-/// Destroy the WhatsApp organ entirely.
+/// "Close" the organ — we just hide it. The webview stays loaded
+/// so WhatsApp remains logged in and the monitor keeps running.
 #[tauri::command]
 fn close_whatsapp_organ(app: tauri::AppHandle) {
-    if let Some(wa) = app.get_webview_window("whatsapp-organ") {
-        let _ = wa.set_always_on_top(false);
-        let _ = wa.set_fullscreen(false);
+    if let Some(wa) = app.get_webview("whatsapp-organ") {
         let _ = wa.hide();
-        std::thread::sleep(std::time::Duration::from_millis(80));
-        let _ = wa.destroy();
-        // Bring main back if needed
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.show();
-            let _ = main.set_always_on_top(true);
-            let _ = main.set_fullscreen(true);
-            let _ = main.set_focus();
-        }
-        eprintln!("[lexicon] WhatsApp organ destroyed");
+        WA_VISIBLE.store(false, Ordering::Relaxed);
+        eprintln!("[lexicon] WhatsApp organ hidden (close)");
     }
 }
 
-/// Get the current state of the WhatsApp organ.
-/// Returns: "closed" | "visible" | "background"
+/// Get organ status: "closed" | "visible" | "background"
 #[tauri::command]
-fn whatsapp_organ_status(app: tauri::AppHandle) -> String {
-    match app.get_webview_window("whatsapp-organ") {
-        Some(wa) => {
-            if wa.is_visible().unwrap_or(false) {
-                "visible".to_string()
-            } else {
-                "background".to_string()
-            }
-        }
-        None => "closed".to_string(),
+fn whatsapp_organ_status(_app: tauri::AppHandle) -> String {
+    if !WA_CREATED.load(Ordering::Relaxed) {
+        "closed".to_string()
+    } else if WA_VISIBLE.load(Ordering::Relaxed) {
+        "visible".to_string()
+    } else {
+        "background".to_string()
     }
 }
 
-// ── IPC Relay commands ─────────────────────────────────────────
-// Called from the injected JS in the WhatsApp webview.
-// Tauri IPC bypasses CSP so this works even on web.whatsapp.com.
-// We forward the data to the Brain via HTTP from the Rust side.
+// ── IPC Relay ──────────────────────────────────────────────────
+// Called from the injected JS in the WhatsApp child webview.
+// Tauri IPC works because the child webview is part of the Tauri app.
 
-/// Relay a WhatsApp message from the injected monitor to the Brain.
+/// Relay a batch of WhatsApp messages to the Brain.
 #[tauri::command]
-fn wa_relay_message(payload: String) {
+fn wa_relay_batch(payload: String) {
     std::thread::spawn(move || {
-        let client = reqwest::blocking::Client::new();
-        match client
-            .post(format!("{}/whatsapp/message", BRAIN_URL))
+        match HTTP
+            .post(format!("{}/whatsapp/batch", BRAIN_URL))
             .header("Content-Type", "application/json")
             .body(payload)
             .send()
         {
-            Ok(resp) => {
-                eprintln!("[lexicon] wa_relay_message → Brain: {}", resp.status());
-            }
-            Err(e) => {
-                eprintln!("[lexicon] wa_relay_message failed: {e}");
-            }
+            Ok(resp) => eprintln!("[lexicon] wa_relay_batch → Brain: {}", resp.status()),
+            Err(e) => eprintln!("[lexicon] wa_relay_batch failed: {e}"),
         }
     });
 }
 
-/// Relay a WhatsApp status update from the injected monitor to the Brain.
+/// Relay a WhatsApp status update to the Brain.
 #[tauri::command]
 fn wa_relay_status(status: String) {
     std::thread::spawn(move || {
@@ -226,19 +179,14 @@ fn wa_relay_status(status: String) {
             status,
             chrono::Utc::now().to_rfc3339()
         );
-        let client = reqwest::blocking::Client::new();
-        match client
+        match HTTP
             .post(format!("{}/whatsapp/status", BRAIN_URL))
             .header("Content-Type", "application/json")
             .body(body)
             .send()
         {
-            Ok(resp) => {
-                eprintln!("[lexicon] wa_relay_status({status}) → Brain: {}", resp.status());
-            }
-            Err(e) => {
-                eprintln!("[lexicon] wa_relay_status failed: {e}");
-            }
+            Ok(resp) => eprintln!("[lexicon] wa_relay_status({status}) → Brain: {}", resp.status()),
+            Err(e) => eprintln!("[lexicon] wa_relay_status failed: {e}"),
         }
     });
 }
@@ -254,17 +202,14 @@ pub fn run() {
             show_whatsapp_organ,
             close_whatsapp_organ,
             whatsapp_organ_status,
-            wa_relay_message,
+            wa_relay_batch,
             wa_relay_status,
         ])
         .setup(|app| {
-            // Window starts visible so the WebView boots and JS executes
-            // (hidden windows don't run JS on GNOME Wayland).
-            // We hide it after a brief delay once the WebView has loaded.
+            // Window starts visible so the WebView boots and JS executes.
             if let Some(window) = app.get_webview_window("main") {
                 let w = window.clone();
                 std::thread::spawn(move || {
-                    // Give the WebView time to load and establish the WebSocket
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     let _ = w.hide();
                     eprintln!("[lexicon] WebView booted → window hidden (waiting for toggle)");
