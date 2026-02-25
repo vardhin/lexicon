@@ -20,9 +20,11 @@
 
 ## What is Lexicon?
 
-Lexicon is a **desktop overlay intelligence layer**. You press `Super + `` ` on your Linux desktop, a transparent fullscreen window appears with a centered input bar (the **Synapse Bar**), and you type natural language commands like `"clock"`, `"timer 5m"`, or `"weather"`. Lexicon interprets the command and renders **floating glass widgets** on the overlay in real time.
+Lexicon is a **desktop overlay intelligence layer**. You press `Super + `` ` on your desktop, a transparent fullscreen window appears with a centered input bar (the **Synapse Bar**), and you type natural language commands like `"clock"`, `"timer 5m"`, or `"weather"`. Lexicon interprets the command and renders **floating glass widgets** on the overlay in real time.
 
 It's not a terminal. It's not an app launcher. It's a **programmable visual nervous system** for your desktop.
+
+The Tauri client runs persistently in the background (no taskbar icon, zero CPU when hidden) and toggles instantly via `lexicon-toggle` — a script you bind to any hotkey in any desktop environment. The toggle flows through ZeroMQ (the Spine) → FastAPI (the Brain) → WebSocket → Svelte → Rust IPC show/hide. Escape hides the overlay. Entire round-trip <5ms. Works on GNOME, KDE, Hyprland, Sway, and any X11/Wayland compositor.
 
 ---
 
@@ -34,17 +36,29 @@ Lexicon is a multi-layer system:
 |-------|------|------|------|
 | **0** | **The Body** | Tauri + Bun + SvelteKit | Transparent fullscreen window, IPC, WebView rendering |
 | **1** | **The Brain** | Python + FastAPI + uv | Rule-based grammar engine, WebSocket hub, extension loader |
-| **2** | **The Spine** | Redis / ZeroMQ *(planned)* | Pub/Sub event bus between layers |
+| **2** | **The Spine** | ZeroMQ (pyzmq) | PUSH/PULL + PUB event bus between layers |
 | **3** | **The Memory** | SurrealDB (embedded) | Persistent graph + document storage for UI state, command history, context |
 | **4** | **External Sensors** | CLI scripts, daemons *(planned)* | System monitors, ad-hoc data pushers |
 
 ### Data Flow
 
 ```
-User presses Super+`  →  Tauri window appears (Layer 0)
-                      →  Svelte connects to WebSocket
+Boot                  →  dev.sh starts backend (+ Spine) + Tauri client
+                      →  Tauri window opens briefly (WebView boots, JS executes)
+                      →  Svelte connects to WebSocket (ws://127.0.0.1:8000/ws)
+                      →  Rust auto-hides the window after 2s (WebView stays alive)
+                      →  Lexicon is now idle — zero CPU, no taskbar icon
+
+User presses Super+`  →  lexicon-toggle PUSHes "lexicon/toggle" to Spine (Layer 2)
+                      →  Spine dispatches to Brain (Layer 1)
+                      →  Brain broadcasts TOGGLE_VISIBILITY over WebSocket
+                      →  Svelte calls invoke("toggle_window") → Rust IPC
+                      →  Rust shows window + sets fullscreen + focuses
                       →  Backend sends RESTORE_STATE with saved widgets from SurrealDB (Layer 3)
                       →  Svelte re-hydrates the render list — widgets reappear instantly
+
+User presses Escape   →  Svelte calls invoke("toggle_window") → Rust hides window
+                      →  Window disappears instantly, WebView stays connected
 
 User types "clock"    →  Svelte sends { type: "query", text: "clock" } via WebSocket
                       →  FastAPI receives it (Layer 1), logs command to Memory
@@ -61,13 +75,13 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 
 ## Status
 
-> **Current phase: Layer 0 + Layer 1 — core loop functional.**
+> **Current phase: Layer 0 + Layer 1 + Layer 2 — core loop + Spine functional.**
 
 ### ✅ Implemented
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| **Tauri shell (Layer 0)** | ✅ Complete | Transparent, borderless, always-on-top, fullscreen via Hyprland IPC. `Super+`` toggle via Hyprland keybind. Builds to release binary (~16MB). |
+| **Tauri shell (Layer 0)** | ✅ Complete | Transparent, borderless, always-on-top, fullscreen. Boots visible (so WebView JS executes and WebSocket connects), then Rust auto-hides after 2s. Toggle via `lexicon-toggle` (ZeroMQ PUSH → Spine → Brain → WebSocket → Svelte `invoke("toggle_window")` → Rust IPC show/hide). Escape hides when input is empty. Fallback: `curl -X POST localhost:8000/toggle`. Builds to release binary (~16MB). |
 | **Svelte frontend (Layer 0)** | ✅ Complete | SPA mode, static adapter, frost-glass overlay, Synapse Bar with command history (↑↓), feedback toasts, connection status dot. |
 | **Paged workspace (Layer 0)** | ✅ Complete | Vertically scrolling canvas divided into pages by thin aesthetic divider lines. Sidebar with page numbers for smooth scroll navigation. Auto-expands pages as content grows. Widgets freely span across dividers. |
 | **Widget renderer (Layer 0)** | ✅ Complete | Dynamic render list driven by WebSocket. Widgets positioned absolutely at `(x, y, w, h)` from backend. Glass-blur frames, pop-in animation, per-widget dismiss. |
@@ -76,8 +90,8 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Widget resizing (Layer 0)** | ✅ Complete | Corner resize handle (bottom-right) on hover. Min size 160×100. Sizes persist alongside positions. |
 | **Shell mode (Layer 0+1)** | ✅ Complete | Synapse Bar doubles as a **real zsh shell** with your full Arch env. Persistent zsh session per connection — `cd`, `z`, `export` changes stick between commands. TUI programs (`btop`, `vim`, `htop`) detected and rejected with helpful message. Ctrl+C / ^C button to kill running commands. 60s timeout. Prefix `!` or `$`, or type common commands (`ls`, `git`, `cat`, etc.) directly. Output streams line-by-line between green dividers on the canvas, auto-scrolling. Every command + full output + exit code persisted to SurrealDB and restored on reconnect. |
 | **Workspaces (Layer 0+3)** | ✅ Complete | Named workspaces stored in SurrealDB. Click ✦ logo → workspace menu: create, switch, delete workspaces. Each workspace has independent widgets, shell history, and state. 🧹 clear button wipes current workspace canvas + DB. Auto-saves on switch, auto-restores on load. |
-| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `RESTORE_SHELL`, `SHELL_OUTPUT`, `SHELL_DONE`, `WORKSPACE_INFO`. |
-| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, system stats at `/system`. Persistent shell session per connection. Connection manager with broadcast, CORS enabled. Sends `WORKSPACE_INFO` + `RESTORE_STATE` + `RESTORE_SHELL` on connect. Workspace CRUD: `create_workspace`, `switch_workspace`, `delete_workspace`, `clear_workspace`, `list_workspaces`. |
+| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `RESTORE_SHELL`, `SHELL_OUTPUT`, `SHELL_DONE`, `WORKSPACE_INFO`, `TOGGLE_VISIBILITY`. |
+| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. Persistent shell session per connection. Connection manager with broadcast, CORS enabled. Sends `WORKSPACE_INFO` + `RESTORE_STATE` + `RESTORE_SHELL` on connect. Workspace CRUD: `create_workspace`, `switch_workspace`, `delete_workspace`, `clear_workspace`, `list_workspaces`. |
 | **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline, returns action list. Fallback feedback for unknown commands. |
 | **Extension: clock** | ✅ Complete | Matches ~7 natural language patterns ("what's the time", "show clock", etc). Returns `RENDER_WIDGET` with clock type. Frontend renders live-updating `HH:MM:SS` with gradient text. |
 | **Extension: clear** | ✅ Complete | Matches "clear", "dismiss all", "close", etc. Returns `CLEAR_WIDGETS` to wipe the render list. |
@@ -89,16 +103,16 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 | **Extension: weather** | ✅ Complete | Weather widget (demo mode) — "weather", "forecast". Time-based display placeholder. Ready for real API integration. |
 | **Extension: help** | ✅ Complete | Dynamic help guide — "help", "commands", "?". Auto-collects help metadata from all loaded extensions. Shows icons, descriptions, example commands, and usage tips. |
 | **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists UI state (open widgets), command history, **full shell sessions** (cmd + output + exit code), and **named workspaces**. All data is workspace-scoped. Auto-restores widgets and shell history on reconnect. Output capped at 64KB per session. No external server needed. |
-| **Dev tooling** | ✅ Complete | `dev.sh` — builds Svelte → builds Tauri release binary → starts backend. One command to rebuild everything. |
+| **ZeroMQ Spine (Layer 2)** | ✅ Complete | PUSH/PULL + PUB event bus. Brain binds PULL on `:5557` and PUB on `:5556`. External scripts PUSH commands (e.g., `lexicon/toggle`). Brain dispatches to handlers which broadcast over WebSocket to the Body. Toggle goes: ZeroMQ → Brain → WebSocket → Svelte → Rust IPC (`toggle_window`). HTTP fallback at `POST /toggle`. |
+| **Dev tooling** | ✅ Complete | `dev.sh` — builds Svelte → builds Tauri release binary → starts backend (+ Spine) + Tauri client. One command to rebuild and run everything. `lexicon-toggle` for hotkey binding. |
 
 ### 🔲 Not Yet Implemented
 
 | Component | Layer | Notes |
 |-----------|-------|-------|
 | **Hidden WebViews (Organs)** | 0 | WhatsApp, Discord, etc. via injected JS in hidden Tauri WebViews. DOM scraping → events. `src-tauri/injections/` exists but is empty. |
-| **CSS Morph / UI Payload push** | 0 | Backend pushing live CSS/theme changes to the overlay. |
-| **Redis / ZeroMQ event bus (Spine)** | 2 | Pub/Sub decoupling between Brain, Sensors, and Body. `infra/` folder exists but is empty. |
-| **CLI event scripts** | 4 | Ad-hoc scripts that push events into the bus (e.g., `lexicon push "meeting in 5min"`). |
+| **CSS Morph / UI Payload push** | 0 | Backend pushing live CSS/theme changes to the overlay. Push via `lexicon/theme` Spine channel. |
+| **CLI event scripts** | 4 | Ad-hoc scripts that push events into the Spine (e.g., `lexicon push "meeting in 5min"` via ZeroMQ PUSH to `:5557`). |
 
 ---
 
@@ -106,7 +120,7 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
 
 ### Prerequisites
 
-- **Arch Linux** (or any Linux with Hyprland — the WM integration is Hyprland-specific)
+- **Linux** (any desktop environment — GNOME, KDE, Hyprland, Sway, etc.)
 - [Rust](https://rustup.rs/) + Cargo
 - [Bun](https://bun.sh/)
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
@@ -138,19 +152,33 @@ cd ..
 This will:
 1. Build the Svelte static site (`bun run build`)
 2. Build the Tauri release binary (`bun run tauri build`)
-3. Start the FastAPI backend on `:8000` with hot-reload
+3. Start the FastAPI backend + ZeroMQ Spine on `:8000` / `:5557`
+4. Launch the Tauri client in the background (hidden)
 
-Then press **`Super + `` `** to open the overlay (requires the Hyprland keybind below).
+### Toggle the overlay
 
-### Hyprland Keybind
+Bind `lexicon-toggle` to your preferred hotkey in your desktop environment:
 
-Add to your `~/.config/hypr/config/keybinds.conf`:
+| DE | How to bind |
+|----|-------------|
+| **GNOME** | Settings → Keyboard → Custom Shortcuts → `Super+`` ` → `/path/to/lexicon/lexicon-toggle` |
+| **KDE** | System Settings → Shortcuts → Custom Shortcuts → add `lexicon-toggle` |
+| **Hyprland** | `bind = $mainMod, grave, exec, /path/to/lexicon/lexicon-toggle` |
+| **Sway** | `bindsym $mod+grave exec /path/to/lexicon/lexicon-toggle` |
 
-```ini
-bind = $mainMod, grave, exec, pkill -x lexicon-frontend || /path/to/lexicon/lexicon-frontend/src-tauri/target/release/lexicon-frontend
+Or toggle manually:
+
+```bash
+# Via ZeroMQ (instant)
+./lexicon-toggle
+
+# Via HTTP (works from anywhere)
+curl -X POST localhost:8000/toggle
 ```
 
-This toggles the overlay: if it's running, kill it; if not, launch it.
+Press **`Escape`** (with an empty input) to hide the overlay from within.
+
+> **How it works:** `lexicon-toggle` PUSHes `"lexicon/toggle"` via ZeroMQ to the Spine (`:5557`). The Brain receives it, broadcasts `TOGGLE_VISIBILITY` over WebSocket to the Svelte frontend, which calls `invoke("toggle_window")` — a Rust IPC command that does the actual `window.show()` / `window.hide()` from the Rust side. This bypasses Wayland permission issues. The window boots visible so the WebView can load (GNOME Wayland suspends JS in hidden windows), then Rust auto-hides it after 2 seconds. The entire toggle round-trip is <5ms.
 
 ---
 
@@ -220,6 +248,7 @@ Restart the backend (it auto-reloads), rebuild the frontend (`./dev.sh`). Done.
 ```
 lexicon/
 ├── dev.sh                          # Build + run everything
+├── lexicon-toggle                  # Toggle script — bind to your DE hotkey
 ├── extensions/                     # Backend extension logic (Python)
 │   ├── calculator.py               #   Inline math evaluator
 │   ├── clear.py                    #   Clear all widgets
@@ -234,9 +263,11 @@ lexicon/
 │   ├── pyproject.toml              #   uv project config
 │   ├── run.sh                      #   Start backend standalone
 │   └── src/
-│       ├── main.py                 #   FastAPI app + WebSocket endpoint
+│       ├── main.py                 #   FastAPI app + WebSocket + /toggle endpoint
 │       ├── engine.py               #   Grammar engine (loads extensions/)
 │       ├── memory.py               #   SurrealDB embedded memory (Layer 3)
+│       ├── spine.py                #   ZeroMQ PUSH/PULL + PUB event bus (Layer 2)
+│       ├── shell.py                #   Persistent zsh session per connection
 │       └── connection_manager.py   #   WebSocket connection tracking
 ├── lexicon-frontend/               # Layer 0: The Body
 │   ├── package.json                #   Bun/Vite/SvelteKit config
@@ -261,7 +292,7 @@ lexicon/
 │       ├── injections/             #   (empty) Future: injected JS for hidden WebViews
 │       └── src/
 │           ├── main.rs             #   Rust entry point
-│           └── lib.rs              #   Tauri setup + Hyprland fullscreen hack
+│           └── lib.rs              #   Tauri setup + toggle_window IPC command
 ├── infra/
 │   └── data/                       #   SurrealDB file store (gitignored, auto-created)
 └── architecture/                   # Architecture diagram (Mermaid)
@@ -277,11 +308,11 @@ lexicon/
 - [x] **Widget resizing** — corner drag handle, min-size constraints, persisted
 - [x] **Paged workspace** — scrollable multi-page canvas with sidebar navigation and dividers
 - [x] **Shell mode** — execute zsh commands directly in the Synapse Bar, streaming output on canvas
-- [ ] **Redis/ZeroMQ Spine** — decouple Brain from Body with pub/sub
+- [x] **ZeroMQ Spine** — PUSH/PULL + PUB event bus, `lexicon-toggle` script, `POST /toggle` HTTP fallback
 - [ ] **Hidden WebViews (Organs)** — scrape WhatsApp/Discord/Gmail via injected JS
-- [ ] **SysMon daemon** — push system metrics as events
-- [ ] **CLI tool** — `lexicon push "reminder text"` from terminal
-- [ ] **Theming** — runtime CSS morph pushed from backend
+- [ ] **SysMon daemon** — push system metrics as events via Spine
+- [ ] **CLI tool** — `lexicon push "reminder text"` from terminal via Spine
+- [ ] **Theming** — runtime CSS morph pushed via `lexicon/theme` Spine channel
 
 ---
 

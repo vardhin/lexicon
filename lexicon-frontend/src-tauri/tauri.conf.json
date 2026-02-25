@@ -18,7 +18,9 @@
         "decorations": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "visible": true
+        "visible": true,
+        "width": 1920,
+        "height": 1080
       }
     ],
     "security": {

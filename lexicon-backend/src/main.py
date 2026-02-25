@@ -12,18 +12,32 @@ from src.engine import GrammarEngine
 from src.connection_manager import ConnectionManager
 from src.memory import Memory
 from src.shell import PersistentShell
+from src.spine import Spine
 
 manager = ConnectionManager()
 engine = GrammarEngine()
 memory = Memory()
+spine = Spine()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🧠 Lexicon Brain starting up...")
     await memory.connect()
+
+    # ── Start the Spine (Layer 2 — ZeroMQ event bus) ──
+    await spine.start()
+
+    # Register toggle handler: when any script publishes to lexicon/toggle,
+    # broadcast TOGGLE_VISIBILITY to all connected WebSocket clients (the Body).
+    async def handle_toggle(channel: str, payload: str):
+        await manager.broadcast({"type": "TOGGLE_VISIBILITY"})
+
+    spine.on("lexicon/toggle", handle_toggle)
+
     yield
     print("🧠 Lexicon Brain shutting down...")
+    await spine.stop()
     await memory.close()
     await manager.disconnect_all()
 
@@ -42,6 +56,13 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "alive", "connections": manager.active_count}
+
+
+@app.post("/toggle")
+async def toggle_visibility():
+    """Toggle the overlay visibility. Can be called via curl or any HTTP client."""
+    await manager.broadcast({"type": "TOGGLE_VISIBILITY"})
+    return {"status": "toggled"}
 
 
 @app.get("/system")

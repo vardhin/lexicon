@@ -3,6 +3,18 @@
   import { createWS } from '$lib/ws.js';
   import registry from '$lib/widgets/index.js';
 
+  // ── Tauri IPC (for toggling overlay visibility) ──
+  let tauriInvoke = null;
+  let tauriWindow = null;
+  if (typeof window !== 'undefined') {
+    import('@tauri-apps/api/core').then(mod => {
+      tauriInvoke = mod.invoke;
+    }).catch(() => {});
+    import('@tauri-apps/api/window').then(mod => {
+      tauriWindow = mod.getCurrentWindow();
+    }).catch(() => {});
+  }
+
   // ── state ──
   let ws = null;
   let connected = false;
@@ -43,6 +55,18 @@
       if (bottom > y) y = bottom + 16;
     }
     return y;
+  }
+
+  // ── toggle overlay visibility (called via Spine → WebSocket → Rust IPC) ──
+  function toggleOverlay() {
+    if (tauriInvoke) {
+      tauriInvoke('toggle_window').then(function () {
+        // After showing, focus the input
+        setTimeout(function () { if (inputEl) inputEl.focus(); }, 150);
+      }).catch(function (err) {
+        console.error('toggle_window failed:', err);
+      });
+    }
   }
 
   // ── lifecycle ──
@@ -157,6 +181,9 @@
     else if (msg.type === 'WORKSPACE_INFO') {
       workspaceList = msg.workspaces || ['default'];
       currentWorkspace = msg.current || 'default';
+    }
+    else if (msg.type === 'TOGGLE_VISIBILITY') {
+      toggleOverlay();
     }
   }
 
@@ -386,7 +413,12 @@
       if (historyIdx < history.length - 1) { historyIdx++; query = history[historyIdx]; }
       else { historyIdx = history.length; query = ''; }
     } else if (e.key === 'Escape') {
-      query = '';
+      if (query === '' && tauriInvoke) {
+        // If query is already empty, hide the overlay via Rust IPC
+        tauriInvoke('toggle_window');
+      } else {
+        query = '';
+      }
     } else if (e.key === 'c' && e.ctrlKey) {
       // Ctrl+C — kill running shell command
       e.preventDefault();
