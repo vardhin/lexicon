@@ -216,6 +216,22 @@
     else if (msg.type === 'TOGGLE_VISIBILITY') {
       toggleOverlay();
     }
+
+    // ── WhatsApp messages → routed to WhatsAppWidget listeners ──
+    else if (msg.type === 'WHATSAPP_MESSAGE' || msg.type === 'WHATSAPP_CHATS' ||
+             msg.type === 'WHATSAPP_MESSAGES' || msg.type === 'WHATSAPP_STATUS') {
+      var listeners = window.__lexicon_whatsapp_listeners || [];
+      for (var li = 0; li < listeners.length; li++) {
+        try { listeners[li](msg); } catch (_) {}
+      }
+      // If it's a new message and no whatsapp widget is open, show a toast
+      if (msg.type === 'WHATSAPP_MESSAGE') {
+        var hasWaWidget = widgets.some(function (w) { return w.type === 'whatsapp'; });
+        if (!hasWaWidget) {
+          showFeedback('💬 ' + msg.contact + ': ' + (msg.text || '').substring(0, 50));
+        }
+      }
+    }
   }
 
   function addWidget(msg) {
@@ -411,6 +427,26 @@
     saveState();
   }
 
+  // ── WhatsApp tab toggle ──
+  function toggleWhatsAppTab() {
+    if (!tauriInvoke) return;
+    // Check current organ status and toggle accordingly
+    tauriInvoke('whatsapp_organ_status').then(function (status) {
+      if (status === 'closed') {
+        // Not started → open WhatsApp tab
+        tauriInvoke('open_whatsapp_organ').catch(function (err) {
+          console.error('Failed to open WhatsApp tab:', err);
+        });
+      } else if (status === 'visible') {
+        // Currently viewing → hide it, come back to Lexicon
+        tauriInvoke('show_whatsapp_organ', { visible: false }).catch(function () {});
+      } else {
+        // Running in background → bring it to front
+        tauriInvoke('show_whatsapp_organ', { visible: true }).catch(function () {});
+      }
+    }).catch(function () {});
+  }
+
   // ── input handling ──
   var _shellPrefixRe = /^(ls|cd|cat|echo|pwd|mkdir|rm|cp|mv|grep|find|head|tail|wc|df|du|free|uname|whoami|which|env|export|curl|wget|git|docker|npm|bun|cargo|python|pip|make|gcc|neofetch|htop|top|ps|kill|ping|ssh|scp|tar|zip|unzip|chmod|chown|man|apt|pacman|yay|paru|systemctl|journalctl|ip|ss|mount|lsblk|bat|eza|fd|rg|fzf|sed|awk|sort|uniq|tee|xargs|date|touch|tree|less|more|btop|vim|nvim|nano|tmux|screen|ssh|nnn|ranger)\b/;
 
@@ -568,6 +604,8 @@
     <div class="sidebar-bottom">
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div class="sidebar-action" on:click={spawnSession} title="New terminal (Ctrl+`)">🐚</div>
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div class="sidebar-action" on:click={toggleWhatsAppTab} title="WhatsApp tab">💬</div>
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div class="sidebar-action" on:click={clearWorkspace} title="Clear workspace">🧹</div>
       <div class="ws-label" title={currentWorkspace}>{currentWorkspace.substring(0, 3)}</div>

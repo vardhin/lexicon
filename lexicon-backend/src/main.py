@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.engine import GrammarEngine
@@ -34,6 +34,17 @@ async def lifespan(app: FastAPI):
         await manager.broadcast({"type": "TOGGLE_VISIBILITY"})
 
     spine.on("lexicon/toggle", handle_toggle)
+
+    # Register WhatsApp message handler from Spine
+    async def handle_whatsapp(channel: str, payload: str):
+        """Handle WhatsApp messages arriving via ZeroMQ (future: CLI push)."""
+        try:
+            data = json.loads(payload)
+            await _process_whatsapp_message(data)
+        except Exception as e:
+            print(f"⚠️  Spine WhatsApp handler error: {e}")
+
+    spine.on("lexicon/whatsapp", handle_whatsapp)
 
     yield
     print("🧠 Lexicon Brain shutting down...")
@@ -130,6 +141,96 @@ async def system_stats():
         pass
 
     return stats
+
+
+# ── WhatsApp Organ endpoints ──────────────────────────
+
+# Track WhatsApp organ status
+_whatsapp_status = {"status": "disconnected", "timestamp": None}
+
+
+async def _process_whatsapp_message(data: dict):
+    """Shared logic: store a WhatsApp message and broadcast to all clients."""
+    contact = data.get("contact", "Unknown")
+    chat = data.get("chat", contact)
+    text = data.get("text", "")
+    timestamp = data.get("timestamp", datetime.utcnow().isoformat())
+    message_id = data.get("message_id", f"msg-{uuid.uuid4().hex[:8]}")
+    unread_count = data.get("unread_count", 0)
+
+    # Store in SurrealDB — creates contact node if needed
+    await memory.store_whatsapp_message(
+        contact=contact,
+        chat=chat,
+        text=text,
+        timestamp=timestamp,
+        message_id=message_id,
+        unread_count=unread_count,
+    )
+
+    # Broadcast to all connected frontends
+    await manager.broadcast({
+        "type": "WHATSAPP_MESSAGE",
+        "contact": contact,
+        "chat": chat,
+        "text": text,
+        "timestamp": timestamp,
+        "message_id": message_id,
+        "unread_count": unread_count,
+    })
+
+
+@app.post("/whatsapp/message")
+async def whatsapp_message(request: Request):
+    """Receive a WhatsApp message from the injected DOM monitor."""
+    data = await request.json()
+    await _process_whatsapp_message(data)
+    return {"status": "ok"}
+
+
+@app.post("/whatsapp/status")
+async def whatsapp_status_update(request: Request):
+    """Receive status updates from the WhatsApp organ."""
+    global _whatsapp_status
+    data = await request.json()
+    _whatsapp_status = {
+        "status": data.get("status", "unknown"),
+        "timestamp": data.get("timestamp", datetime.utcnow().isoformat()),
+    }
+    # Broadcast status to frontends
+    await manager.broadcast({
+        "type": "WHATSAPP_STATUS",
+        "status": _whatsapp_status["status"],
+        "timestamp": _whatsapp_status["timestamp"],
+    })
+    return {"status": "ok"}
+
+
+@app.get("/whatsapp/status")
+async def whatsapp_get_status():
+    """Get current WhatsApp organ connection status."""
+    return _whatsapp_status
+
+
+@app.get("/whatsapp/contacts")
+async def whatsapp_contacts():
+    """Get all known WhatsApp contacts."""
+    contacts = await memory.get_whatsapp_contacts()
+    return {"contacts": contacts}
+
+
+@app.get("/whatsapp/messages")
+async def whatsapp_messages(contact: str = None, limit: int = 50):
+    """Get recent WhatsApp messages, optionally filtered by contact."""
+    messages = await memory.get_whatsapp_messages(contact=contact, limit=limit)
+    return {"messages": messages}
+
+
+@app.get("/whatsapp/chats")
+async def whatsapp_chats(limit: int = 20):
+    """Get a summary of recent chats (latest message per contact)."""
+    chats = await memory.get_whatsapp_chats_summary(limit=limit)
+    return {"chats": chats}
 
 
 @app.websocket("/ws")
@@ -303,6 +404,29 @@ async def websocket_endpoint(ws: WebSocket):
                         "workspaces": workspaces,
                         "current": await memory.get_current_workspace(),
                     })
+
+            # ── WhatsApp operations ──
+
+            elif msg_type == "whatsapp_get_chats":
+                limit = payload.get("limit", 20)
+                chats = await memory.get_whatsapp_chats_summary(limit=limit)
+                contacts = await memory.get_whatsapp_contacts()
+                await ws.send_json({
+                    "type": "WHATSAPP_CHATS",
+                    "chats": chats,
+                    "contacts": contacts,
+                    "organ_status": _whatsapp_status.get("status", "disconnected"),
+                })
+
+            elif msg_type == "whatsapp_get_messages":
+                contact = payload.get("contact")
+                limit = payload.get("limit", 50)
+                messages = await memory.get_whatsapp_messages(contact=contact, limit=limit)
+                await ws.send_json({
+                    "type": "WHATSAPP_MESSAGES",
+                    "contact": contact,
+                    "messages": messages,
+                })
 
     except WebSocketDisconnect:
         manager.disconnect(conn_id)

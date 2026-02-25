@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": ["main", "whatsapp-organ"],
   "permissions": [
     "core:default",
     "opener:default",
@@ -12,6 +12,10 @@
     "shell:allow-stdin-write",
     "shell:allow-kill",
     "core:event:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:window:default",
+    "core:window:allow-create",
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-is-visible",
@@ -19,6 +23,10 @@
     "core:window:allow-set-fullscreen",
     "core:window:allow-is-fullscreen",
     "core:window:allow-set-always-on-top",
-    "core:window:allow-center"
+    "core:window:allow-center",
+    "core:window:allow-destroy",
+    "core:webview:default",
+    "core:webview:allow-create-webview",
+    "core:webview:allow-create-webview-window"
   ]
 }

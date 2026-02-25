@@ -203,3 +203,156 @@ class Memory:
                 entry["ts"] = str(ts) if ts else None
             sessions.append(entry)
         return sessions
+
+    # ── WhatsApp Contacts & Messages ────────────────────
+
+    async def ensure_whatsapp_contact(self, name: str) -> str:
+        """Create a contact node if it doesn't exist. Returns the contact ID."""
+        if not self.db:
+            return name
+        # Check if contact already exists
+        result = await self.db.query(
+            "SELECT * FROM whatsapp_contact WHERE name = $name",
+            {"name": name},
+        )
+        if result and len(result) > 0:
+            return str(result[0].get("id", name))
+        # Create new contact node
+        await self.db.query(
+            "CREATE whatsapp_contact SET name = $name, "
+            "first_seen = time::now(), last_seen = time::now(), "
+            "message_count = 0",
+            {"name": name},
+        )
+        return name
+
+    async def store_whatsapp_message(self, contact: str, chat: str, text: str,
+                                      timestamp: str, message_id: str,
+                                      unread_count: int = 0):
+        """Store a WhatsApp message and update the contact node."""
+        if not self.db:
+            return
+
+        # Ensure contact exists
+        await self.ensure_whatsapp_contact(contact)
+
+        # Check if this exact message was already stored (dedup)
+        existing = await self.db.query(
+            "SELECT * FROM whatsapp_message WHERE message_id = $mid",
+            {"mid": message_id},
+        )
+        if existing and len(existing) > 0:
+            return  # Already stored
+
+        # Store the message
+        await self.db.query(
+            "CREATE whatsapp_message SET "
+            "contact = $contact, chat = $chat, text = $text, "
+            "timestamp = $ts, message_id = $mid, "
+            "unread_count = $unread, received_at = time::now()",
+            {
+                "contact": contact,
+                "chat": chat,
+                "text": text,
+                "ts": timestamp,
+                "mid": message_id,
+                "unread": unread_count,
+            },
+        )
+
+        # Update contact's last_seen and increment message count
+        await self.db.query(
+            "UPDATE whatsapp_contact SET last_seen = time::now(), "
+            "message_count = message_count + 1 "
+            "WHERE name = $name",
+            {"name": contact},
+        )
+
+    async def get_whatsapp_messages(self, contact: str = None, limit: int = 50):
+        """Get recent WhatsApp messages, optionally filtered by contact."""
+        if not self.db:
+            return []
+
+        if contact:
+            result = await self.db.query(
+                "SELECT * FROM whatsapp_message WHERE contact = $contact "
+                "ORDER BY received_at DESC LIMIT $limit",
+                {"contact": contact, "limit": limit},
+            )
+        else:
+            result = await self.db.query(
+                "SELECT * FROM whatsapp_message "
+                "ORDER BY received_at DESC LIMIT $limit",
+                {"limit": limit},
+            )
+
+        if not result:
+            return []
+
+        messages = []
+        for row in reversed(result):
+            entry = dict(row)
+            # Convert datetime fields to ISO strings
+            for key in ("received_at", "timestamp"):
+                val = entry.get(key)
+                if hasattr(val, "isoformat"):
+                    entry[key] = val.isoformat()
+                elif val:
+                    entry[key] = str(val)
+            messages.append(entry)
+        return messages
+
+    async def get_whatsapp_contacts(self):
+        """Get all known WhatsApp contacts with their message counts."""
+        if not self.db:
+            return []
+        result = await self.db.query(
+            "SELECT name, message_count, last_seen, first_seen "
+            "FROM whatsapp_contact ORDER BY last_seen DESC"
+        )
+        if not result:
+            return []
+
+        contacts = []
+        for row in result:
+            entry = dict(row)
+            for key in ("last_seen", "first_seen"):
+                val = entry.get(key)
+                if hasattr(val, "isoformat"):
+                    entry[key] = val.isoformat()
+                elif val:
+                    entry[key] = str(val)
+            contacts.append(entry)
+        return contacts
+
+    async def get_whatsapp_chats_summary(self, limit: int = 20):
+        """Get a summary of recent chats — last message per contact."""
+        if not self.db:
+            return []
+        # Get the latest message per contact
+        result = await self.db.query(
+            "SELECT contact, chat, text, timestamp, received_at, unread_count "
+            "FROM whatsapp_message "
+            "ORDER BY received_at DESC LIMIT $limit",
+            {"limit": limit * 3},  # Over-fetch, then deduplicate
+        )
+        if not result:
+            return []
+
+        # Deduplicate by contact — keep only the latest message
+        seen_contacts = {}
+        for row in result:
+            c = row.get("contact", "")
+            if c not in seen_contacts:
+                entry = dict(row)
+                for key in ("received_at", "timestamp"):
+                    val = entry.get(key)
+                    if hasattr(val, "isoformat"):
+                        entry[key] = val.isoformat()
+                    elif val:
+                        entry[key] = str(val)
+                seen_contacts[c] = entry
+            if len(seen_contacts) >= limit:
+                break
+
+        return list(seen_contacts.values())
