@@ -4,6 +4,7 @@
   Falls back to a simple display if data unavailable.
   Props: { props, onDismiss }
 -->
+<!-- svelte-ignore export_let_unused -->
 <script>
   import { onMount, onDestroy } from 'svelte';
 

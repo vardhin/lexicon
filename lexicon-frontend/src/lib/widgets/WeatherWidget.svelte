@@ -3,6 +3,7 @@
   In production this would fetch from a weather API.
   Props: { props, onDismiss }
 -->
+<!-- svelte-ignore export_let_unused -->
 <script>
   import { onMount, onDestroy } from 'svelte';
 

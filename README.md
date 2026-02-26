@@ -72,15 +72,13 @@ User types "clock"    →  Svelte sends { type: "query", text: "clock" } via Web
                       →  Svelte renders <ClockWidget> at (50, 50) with glass blur frame
 
 User opens WhatsApp   →  Sidebar 💬 button toggles WhatsAppWidget on the canvas
-                      →  Widget calls invoke("open_whatsapp_organ", { x, y, w, h })
-                      →  Rust creates a CHILD WEBVIEW loading web.whatsapp.com
-                      →  Child webview positioned to exactly overlay the widget's DOM rect
-                      →  Injected whatsapp_monitor.js scans sidebar + open chat DOM
-                      →  Messages batched (500ms) → Tauri IPC → Rust → HTTP POST /whatsapp/batch
-                      →  Brain stores in SurrealDB, broadcasts WHATSAPP_BATCH over WebSocket
+                      →  Widget calls Brain HTTP API: POST /organs (register) + POST /organs/whatsapp/launch
+                      →  Brain's OrganManager opens a tab in the Playwright ghost browser
+                      →  Ghost browser (headed, off-screen) loads web.whatsapp.com
+                      →  Playwright provides direct DOM access: query_selector, content(), evaluate()
+                      →  Brain stores messages in SurrealDB, broadcasts WHATSAPP_BATCH over WebSocket
                       →  WhatsAppWidget receives batch, groups by chat name, updates UI
-                      →  Widget has two views: dashboard (chat list) or live (WhatsApp inside)
-                      →  Dismissing widget hides the webview but keeps it running in background
+                      →  All organs run as tabs in one browser — no separate processes, no injected JS
 ```
 
 ---

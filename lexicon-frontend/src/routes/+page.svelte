@@ -103,6 +103,7 @@
     setTimeout(function () {
       var active = document.activeElement;
       // If focus is on body/root/canvas (i.e. nothing specific), grab it
+      // But don't steal focus from widget inputs, textareas, or other interactive elements
       if (active === document.body || active === null || (active && active.classList && active.classList.contains('canvas'))) {
         if (inputEl) inputEl.focus();
       }
@@ -225,29 +226,9 @@
       toggleOverlay();
     }
 
-    // ── WhatsApp messages → routed to WhatsAppWidget listeners ──
-    else if (msg.type === 'WHATSAPP_MESSAGE' || msg.type === 'WHATSAPP_CHATS' ||
-             msg.type === 'WHATSAPP_MESSAGES' || msg.type === 'WHATSAPP_STATUS' ||
-             msg.type === 'WHATSAPP_BATCH') {
-      var listeners = window.__lexicon_whatsapp_listeners || [];
-      for (var li = 0; li < listeners.length; li++) {
-        try { listeners[li](msg); } catch (_) {}
-      }
-      // Toast for new messages (only if no whatsapp widget open)
-      if (msg.type === 'WHATSAPP_BATCH' && msg.messages && msg.messages.length > 0) {
-        var hasWaWidget = widgets.some(function (w) { return w.type === 'whatsapp'; });
-        if (!hasWaWidget) {
-          var first = msg.messages[0];
-          var extra = msg.count > 1 ? ' (+' + (msg.count - 1) + ' more)' : '';
-          showFeedback('💬 ' + first.contact + ': ' + (first.text || '').substring(0, 40) + extra);
-        }
-      }
-      else if (msg.type === 'WHATSAPP_MESSAGE') {
-        var hasWaWidget2 = widgets.some(function (w) { return w.type === 'whatsapp'; });
-        if (!hasWaWidget2) {
-          showFeedback('💬 ' + msg.contact + ': ' + (msg.text || '').substring(0, 50));
-        }
-      }
+    // ── Organ messages — OrganManagerWidget fetches data via HTTP polling ──
+    else if (msg.type === 'ORGAN_STATUS' || msg.type === 'ORGAN_LIST') {
+      // Informational — widget polls for data
     }
   }
 
@@ -444,36 +425,6 @@
     saveState();
   }
 
-  // ── WhatsApp tab toggle ──
-  function toggleWhatsAppTab() {
-    if (!tauriInvoke) return;
-    // WhatsApp runs as a separate process. Open spawns it, subsequent
-    // calls bring it to front. It's like switching to another app.
-    tauriInvoke('whatsapp_organ_status').then(function (status) {
-      if (status === 'closed') {
-        // Not started → spawn the WhatsApp organ process
-        tauriInvoke('open_whatsapp_organ').then(function () {
-          notifyWaListeners('running');
-          showFeedback('💬 WhatsApp opening in a separate window...');
-        }).catch(function (err) {
-          showFeedback('Failed to open WhatsApp: ' + err);
-        });
-      } else {
-        // Already running → bring it to front
-        tauriInvoke('show_whatsapp_organ', { visible: true }).then(function () {
-          notifyWaListeners('running');
-        }).catch(function () {});
-      }
-    }).catch(function () {});
-  }
-
-  function notifyWaListeners(organStatus) {
-    var listeners = window.__lexicon_whatsapp_listeners || [];
-    for (var li = 0; li < listeners.length; li++) {
-      try { listeners[li]({ type: 'WHATSAPP_ORGAN_STATUS', status: organStatus }); } catch (_) {}
-    }
-  }
-
   // ── input handling ──
   var _shellPrefixRe = /^(ls|cd|cat|echo|pwd|mkdir|rm|cp|mv|grep|find|head|tail|wc|df|du|free|uname|whoami|which|env|export|curl|wget|git|docker|npm|bun|cargo|python|pip|make|gcc|neofetch|htop|top|ps|kill|ping|ssh|scp|tar|zip|unzip|chmod|chown|man|apt|pacman|yay|paru|systemctl|journalctl|ip|ss|mount|lsblk|bat|eza|fd|rg|fzf|sed|awk|sort|uniq|tee|xargs|date|touch|tree|less|more|btop|vim|nvim|nano|tmux|screen|ssh|nnn|ranger)\b/;
 
@@ -632,8 +583,6 @@
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div class="sidebar-action" on:click={spawnSession} title="New terminal (Ctrl+`)">🐚</div>
       <!-- svelte-ignore a11y-no-static-element-interactions -->
-      <div class="sidebar-action" on:click={toggleWhatsAppTab} title="WhatsApp tab">💬</div>
-      <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div class="sidebar-action" on:click={clearWorkspace} title="Clear workspace">🧹</div>
       <div class="ws-label" title={currentWorkspace}>{currentWorkspace.substring(0, 3)}</div>
       <div class="conn-dot" class:on={connected}></div>
@@ -684,7 +633,14 @@
     class="canvas"
     bind:this={canvasEl}
     on:scroll={onCanvasScroll}
-    on:click={() => { if (inputEl) inputEl.focus(); }}
+    on:click={(e) => {
+      // Only refocus synapse bar if clicking the canvas background itself,
+      // not when clicking inside a widget (input, button, etc.)
+      var t = e.target;
+      if (t === canvasEl || (t && t.classList && (t.classList.contains('canvas-inner') || t.classList.contains('divider') || t.classList.contains('divider-line')))) {
+        if (inputEl) inputEl.focus();
+      }
+    }}
   >
     <div class="canvas-inner" style="height:{totalHeight}px;">
 
@@ -719,6 +675,7 @@
           style="left:{w.x}px; top:{w.y}px; width:{w.w}px; height:{w.h}px;"
           on:pointerdown={(e) => onDragStart(e, w.id)}
           on:wheel|stopPropagation
+          on:click|stopPropagation
         >
           <div class="drag-handle"><span class="drag-dots">⋮⋮</span></div>
           <svelte:component this={w.component} props={w.props} onDismiss={() => dismiss(w.id)} />
@@ -887,10 +844,6 @@
   .sidebar-action:hover {
     background: rgba(255,255,255,0.08);
     border-color: rgba(255,255,255,0.1);
-  }
-  .sidebar-action.active {
-    background: rgba(124,138,255,0.12);
-    border-color: rgba(124,138,255,0.3);
   }
   .ws-label {
     font-size: 8px; font-weight: 700; letter-spacing: 0.5px;

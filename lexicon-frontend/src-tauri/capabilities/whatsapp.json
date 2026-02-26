@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "whatsapp-organ",
-  "description": "WhatsApp organ runs as a separate process — no special webview capabilities needed.",
+  "description": "WhatsApp organ runs as a Playwright tab — no special Tauri capabilities needed.",
   "windows": ["main"],
   "permissions": [
     "core:default"

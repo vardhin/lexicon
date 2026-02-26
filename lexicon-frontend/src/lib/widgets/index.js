@@ -17,8 +17,7 @@ import SysMonWidget from './SysMonWidget.svelte';
 import WeatherWidget from './WeatherWidget.svelte';
 import HelpWidget from './HelpWidget.svelte';
 import TerminalWidget from './TerminalWidget.svelte';
-import WhatsAppWidget from './WhatsAppWidget.svelte';
-import WADebugWidget from './WADebugWidget.svelte';
+import OrganManagerWidget from './OrganManagerWidget.svelte';
 
 const registry = {
   clock: ClockWidget,
@@ -30,8 +29,7 @@ const registry = {
   weather: WeatherWidget,
   help: HelpWidget,
   terminal: TerminalWidget,
-  whatsapp: WhatsAppWidget,
-  wadebug: WADebugWidget,
+  organmanager: OrganManagerWidget,
 };
 
 export default registry;

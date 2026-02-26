@@ -13,11 +13,13 @@ from src.connection_manager import ConnectionManager
 from src.memory import Memory
 from src.shell import ShellManager
 from src.spine import Spine
+from src.organ_manager import OrganManager
 
 manager = ConnectionManager()
 engine = GrammarEngine()
 memory = Memory()
 spine = Spine()
+organs = OrganManager()
 
 
 @asynccontextmanager
@@ -28,6 +30,9 @@ async def lifespan(app: FastAPI):
     # ── Start the Spine (Layer 2 — ZeroMQ event bus) ──
     await spine.start()
 
+    # ── Start the Organ Manager (Playwright ghost browser) ──
+    await organs.start()
+
     # Register toggle handler: when any script publishes to lexicon/toggle,
     # broadcast TOGGLE_VISIBILITY to all connected WebSocket clients (the Body).
     async def handle_toggle(channel: str, payload: str):
@@ -35,19 +40,9 @@ async def lifespan(app: FastAPI):
 
     spine.on("lexicon/toggle", handle_toggle)
 
-    # Register WhatsApp message handler from Spine
-    async def handle_whatsapp(channel: str, payload: str):
-        """Handle WhatsApp messages arriving via ZeroMQ (future: CLI push)."""
-        try:
-            data = json.loads(payload)
-            await _process_whatsapp_message(data)
-        except Exception as e:
-            print(f"⚠️  Spine WhatsApp handler error: {e}")
-
-    spine.on("lexicon/whatsapp", handle_whatsapp)
-
     yield
     print("🧠 Lexicon Brain shutting down...")
+    await organs.stop()
     await spine.stop()
     await memory.close()
     await manager.disconnect_all()
@@ -143,215 +138,217 @@ async def system_stats():
     return stats
 
 
-# ── WhatsApp Organ endpoints ──────────────────────────
+# ── Organ Management endpoints (Playwright-powered) ──────────
 
-# Track WhatsApp organ status
-_whatsapp_status = {"status": "disconnected", "timestamp": None}
+@app.get("/organs")
+async def list_all_organs():
+    """List all registered organs with their runtime status."""
+    registered = await memory.list_organs()
+    open_tabs = await organs.get_open_organs()
+    open_ids = {o["organ_id"] for o in open_tabs}
 
-
-async def _process_whatsapp_message(data: dict):
-    """Shared logic: store a WhatsApp message and broadcast to all clients."""
-    contact = data.get("contact", "Unknown")
-    chat = data.get("chat", contact)
-    text = data.get("text", "")
-    timestamp = data.get("timestamp", datetime.utcnow().isoformat())
-    message_id = data.get("message_id", f"msg-{uuid.uuid4().hex[:8]}")
-    unread_count = data.get("unread_count", 0)
-
-    # Store in SurrealDB — creates contact node if needed
-    await memory.store_whatsapp_message(
-        contact=contact,
-        chat=chat,
-        text=text,
-        timestamp=timestamp,
-        message_id=message_id,
-        unread_count=unread_count,
-    )
-
-    # Broadcast to all connected frontends
-    await manager.broadcast({
-        "type": "WHATSAPP_MESSAGE",
-        "contact": contact,
-        "chat": chat,
-        "text": text,
-        "timestamp": timestamp,
-        "message_id": message_id,
-        "unread_count": unread_count,
-    })
+    for o in registered:
+        oid = o.get("organ_id", "")
+        o["running"] = oid in open_ids
+        if oid in open_ids:
+            tab = next((t for t in open_tabs if t["organ_id"] == oid), {})
+            o["status"] = tab.get("status", "connected")
+            o["title"] = tab.get("title", "")
+        else:
+            o["status"] = "closed"
+    return {"organs": registered, "browser_running": organs.is_running}
 
 
-@app.post("/whatsapp/message")
-async def whatsapp_message(request: Request):
-    """Receive a single WhatsApp message from the injected DOM monitor."""
+@app.post("/organs")
+async def create_organ(request: Request):
+    """Register a new organ. Body: { organ_id, url, name? }"""
     data = await request.json()
-    await _process_whatsapp_message(data)
+    organ_id = data.get("organ_id", "").strip()
+    url = data.get("url", "").strip()
+    name = data.get("name", "").strip() or organ_id
+    if not organ_id or not url:
+        return {"status": "error", "detail": "organ_id and url are required"}
+    import re
+    organ_id = re.sub(r'[^a-zA-Z0-9_-]', '-', organ_id).lower().strip('-')
+    if not organ_id:
+        return {"status": "error", "detail": "invalid organ_id"}
+    await memory.create_organ(organ_id, url, name)
+    return {"status": "ok", "organ_id": organ_id}
+
+
+@app.delete("/organs/{organ_id}")
+async def delete_organ(organ_id: str):
+    """Delete an organ. Closes its tab if open."""
+    await organs.close_organ(organ_id)
+    await memory.delete_organ(organ_id)
     return {"status": "ok"}
 
 
-@app.post("/whatsapp/batch")
-async def whatsapp_batch(request: Request):
-    """Receive a BATCH of WhatsApp messages in one request.
+@app.post("/organs/{organ_id}/launch")
+async def launch_organ(organ_id: str):
+    """Open an organ's URL as a tab in the ghost browser."""
+    organ = await memory.get_organ(organ_id)
+    if not organ:
+        return {"status": "error", "detail": "organ not found"}
+    result = await organs.open_organ(organ_id, organ.get("url", ""))
+    return result
 
-    The monitor JS collects messages for ~500ms then flushes them all at once.
-    We store them all, then broadcast a single WHATSAPP_BATCH event to frontends
-    instead of N individual WHATSAPP_MESSAGE events. This prevents stuttering.
+
+@app.post("/organs/{organ_id}/kill")
+async def kill_organ(organ_id: str):
+    """Close an organ's tab."""
+    result = await organs.close_organ(organ_id)
+    return result
+
+
+@app.get("/organs/{organ_id}/status")
+async def organ_status_get(organ_id: str):
+    """Get current organ status."""
+    return organs.get_organ_status(organ_id)
+
+
+@app.get("/organs/{organ_id}/html")
+async def organ_html_get(organ_id: str):
+    """Get full page HTML of an organ."""
+    return await organs.get_html(organ_id)
+
+
+# ── Pattern-based scraping ─────────────────────────────────────
+
+@app.post("/organs/{organ_id}/match")
+async def organ_match_pattern(organ_id: str, request: Request):
+    """Match an outer HTML pattern against the organ's live DOM.
+
+    Body: { "outer_html": "<a class='Link--primary ...' ...>text</a>" }
+
+    Fingerprints the snippet (tag, classes, key attributes) and finds all
+    structurally similar elements in the page via similarity scoring.
+
+    Returns: {
+        "fingerprint": { tag, classes, attrs },
+        "count": N,
+        "matches": [ { text, outerHtml, tag, classes, score }, ... ],
+    }
     """
-    batch = await request.json()
-    if not isinstance(batch, list):
-        return {"status": "error", "detail": "expected array"}
-
-    stored = []
-    for data in batch:
-        contact = data.get("contact", "Unknown")
-        chat = data.get("chat", contact)
-        text = data.get("text", "")
-        timestamp = data.get("timestamp", datetime.utcnow().isoformat())
-        message_id = data.get("message_id", f"msg-{uuid.uuid4().hex[:8]}")
-        unread_count = data.get("unread_count", 0)
-
-        # Store each message
-        await memory.store_whatsapp_message(
-            contact=contact,
-            chat=chat,
-            text=text,
-            timestamp=timestamp,
-            message_id=message_id,
-            unread_count=unread_count,
-        )
-
-        stored.append({
-            "contact": contact,
-            "chat": chat,
-            "text": text,
-            "timestamp": timestamp,
-            "message_id": message_id,
-            "unread_count": unread_count,
-        })
-
-    # Single broadcast for the whole batch
-    if stored:
-        await manager.broadcast({
-            "type": "WHATSAPP_BATCH",
-            "messages": stored,
-            "count": len(stored),
-        })
-
-    return {"status": "ok", "count": len(stored)}
-
-
-@app.post("/whatsapp/status")
-async def whatsapp_status_update(request: Request):
-    """Receive status updates from the WhatsApp organ."""
-    global _whatsapp_status
     data = await request.json()
-    _whatsapp_status = {
-        "status": data.get("status", "unknown"),
-        "timestamp": data.get("timestamp", datetime.utcnow().isoformat()),
+    outer_html = data.get("outer_html", "").strip()
+    if not outer_html:
+        return {"error": "outer_html is required", "count": 0, "matches": []}
+    return await organs.match_pattern(organ_id, outer_html)
+
+
+@app.post("/organs/{organ_id}/scrape")
+async def organ_scrape_pattern(organ_id: str, request: Request):
+    """Scrape: paste an outer HTML pattern, name it, and store all matching
+    elements' text content in Memory under that class name.
+
+    Body: {
+        "class_name": "contact",
+        "outer_html": "<span class='_ak8j'>...</span>",
     }
-    # Broadcast status to frontends
-    await manager.broadcast({
-        "type": "WHATSAPP_STATUS",
-        "status": _whatsapp_status["status"],
-        "timestamp": _whatsapp_status["timestamp"],
-    })
-    return {"status": "ok"}
 
+    Flow:
+      1. Fingerprint the outer_html snippet
+      2. Find all similar elements in the organ's live DOM
+      3. Extract text content from each match
+      4. Store all extracted texts in Memory under organ_id + class_name
+      5. Return the matches
 
-@app.get("/whatsapp/status")
-async def whatsapp_get_status():
-    """Get current WhatsApp organ connection status."""
-    return _whatsapp_status
-
-
-@app.post("/whatsapp/hide")
-async def whatsapp_hide():
-    """Hide the WhatsApp organ overlay. Called from injected JS via HTTP."""
-    await manager.broadcast({"type": "WHATSAPP_HIDE"})
-    return {"status": "hidden"}
-
-
-# ── WhatsApp DOM debug ──
-
-_whatsapp_debug: dict = {"snapshot": None, "scan_report": None, "selector_cache": {}}
-
-
-@app.post("/whatsapp/debug")
-async def whatsapp_debug_post(request: Request):
-    """Receive a DOM debug snapshot from the WhatsApp monitor JS."""
+    Returns: {
+        "class_name": "contact",
+        "count": 14,
+        "values": ["Alice", "Bob", ...],
+        "fingerprint": { tag, classes, attrs },
+    }
+    """
     data = await request.json()
-    _whatsapp_debug["snapshot"] = data.get("snapshot")
-    _whatsapp_debug["scan_report"] = data.get("scan_report")
-    return {"status": "ok"}
+    class_name = data.get("class_name", "").strip().lower().replace(" ", "_")
+    outer_html = data.get("outer_html", "").strip()
+    if not class_name or not outer_html:
+        return {"error": "class_name and outer_html are required"}
 
+    # Match the pattern
+    result = await organs.match_pattern(organ_id, outer_html)
+    if result.get("error"):
+        return result
 
-@app.get("/whatsapp/debug")
-async def whatsapp_debug_get():
-    """Get the latest DOM debug snapshot."""
+    # Extract text values
+    values = []
+    for m in result.get("matches", []):
+        t = (m.get("text") or "").strip()
+        if t:
+            values.append(t)
+
+    # Store the pattern definition in Memory (so it persists and can be re-scraped)
+    await memory.save_scrape_pattern(organ_id, class_name, outer_html, result.get("fingerprint", {}))
+
+    # Store the scraped values in Memory
+    await memory.store_scraped_data(organ_id, class_name, values)
+
     return {
-        "snapshot": _whatsapp_debug.get("snapshot"),
-        "scan_report": _whatsapp_debug.get("scan_report"),
+        "class_name": class_name,
+        "count": len(values),
+        "values": values,
+        "fingerprint": result.get("fingerprint", {}),
     }
 
 
-@app.post("/whatsapp/debug/query")
-async def whatsapp_debug_query(request: Request):
-    """Send a CSS selector query to the WhatsApp organ. The organ evaluates it
-    against its live DOM and sends the result back via POST /whatsapp/debug/query/result."""
+@app.post("/organs/{organ_id}/rescrape")
+async def organ_rescrape(organ_id: str, request: Request):
+    """Re-scrape all saved patterns for an organ (or a specific one).
+
+    Body: { "class_name": "contact" }  (optional — omit to rescrape all)
+
+    Returns: { "results": { "contact": { count, values }, ... } }
+    """
     data = await request.json()
-    selector = data.get("selector", "")
-    # Store the pending query — the monitor JS polls for it
-    _whatsapp_debug["pending_query"] = selector
-    _whatsapp_debug["query_results"] = None
+    target_class = data.get("class_name", "").strip()
 
-    # Wait briefly for results (the monitor checks every second)
-    import asyncio
-    for _ in range(15):  # 1.5s max wait
-        await asyncio.sleep(0.1)
-        if _whatsapp_debug.get("query_results") is not None:
-            results = _whatsapp_debug["query_results"]
-            _whatsapp_debug["query_results"] = None
-            return results
+    patterns = await memory.get_scrape_patterns(organ_id)
+    if not patterns:
+        return {"results": {}}
 
-    return {"count": 0, "results": [], "error": "timeout"}
+    results = {}
+    for pattern in patterns:
+        cname = pattern.get("class_name", "")
+        if target_class and cname != target_class:
+            continue
+        ohtml = pattern.get("outer_html", "")
+        if not ohtml:
+            continue
+
+        match_result = await organs.match_pattern(organ_id, ohtml)
+        values = []
+        for m in match_result.get("matches", []):
+            t = (m.get("text") or "").strip()
+            if t:
+                values.append(t)
+
+        await memory.store_scraped_data(organ_id, cname, values)
+        results[cname] = {"count": len(values), "values": values}
+
+    return {"results": results}
 
 
-@app.get("/whatsapp/debug/pending")
-async def whatsapp_debug_pending():
-    """Get any pending CSS selector query for the monitor to evaluate."""
-    q = _whatsapp_debug.get("pending_query")
-    if q:
-        _whatsapp_debug["pending_query"] = None
-        return {"selector": q}
-    return {"selector": None}
+@app.get("/organs/{organ_id}/patterns")
+async def organ_get_patterns(organ_id: str):
+    """Get all saved scrape patterns for an organ."""
+    patterns = await memory.get_scrape_patterns(organ_id)
+    return {"patterns": patterns}
 
 
-@app.post("/whatsapp/debug/query/result")
-async def whatsapp_debug_query_result(request: Request):
-    """Receive CSS selector query results from the monitor JS."""
-    data = await request.json()
-    _whatsapp_debug["query_results"] = data
+@app.delete("/organs/{organ_id}/patterns/{class_name}")
+async def organ_delete_pattern(organ_id: str, class_name: str):
+    """Delete a scrape pattern and its stored data."""
+    await memory.delete_scrape_pattern(organ_id, class_name)
     return {"status": "ok"}
 
 
-@app.get("/whatsapp/contacts")
-async def whatsapp_contacts():
-    """Get all known WhatsApp contacts."""
-    contacts = await memory.get_whatsapp_contacts()
-    return {"contacts": contacts}
-
-
-@app.get("/whatsapp/messages")
-async def whatsapp_messages(contact: str = None, limit: int = 50):
-    """Get recent WhatsApp messages, optionally filtered by contact."""
-    messages = await memory.get_whatsapp_messages(contact=contact, limit=limit)
-    return {"messages": messages}
-
-
-@app.get("/whatsapp/chats")
-async def whatsapp_chats(limit: int = 20):
-    """Get a summary of recent chats (latest message per contact)."""
-    chats = await memory.get_whatsapp_chats_summary(limit=limit)
-    return {"chats": chats}
+@app.get("/organs/{organ_id}/data")
+async def organ_get_scraped_data(organ_id: str, class_name: str = None):
+    """Get scraped data for an organ, optionally filtered by class_name."""
+    data = await memory.get_scraped_data(organ_id, class_name)
+    return {"data": data}
 
 
 @app.websocket("/ws")
@@ -381,6 +378,13 @@ async def websocket_endpoint(ws: WebSocket):
                 "type": "RESTORE_STATE",
                 "widgets": saved_widgets,
             })
+
+        # Send organ list on connect
+        registered_organs = await memory.list_organs()
+        await ws.send_json({
+            "type": "ORGAN_LIST",
+            "organs": registered_organs,
+        })
 
         while True:
             raw = await ws.receive_text()
@@ -525,29 +529,6 @@ async def websocket_endpoint(ws: WebSocket):
                         "workspaces": workspaces,
                         "current": await memory.get_current_workspace(),
                     })
-
-            # ── WhatsApp operations ──
-
-            elif msg_type == "whatsapp_get_chats":
-                limit = payload.get("limit", 20)
-                chats = await memory.get_whatsapp_chats_summary(limit=limit)
-                contacts = await memory.get_whatsapp_contacts()
-                await ws.send_json({
-                    "type": "WHATSAPP_CHATS",
-                    "chats": chats,
-                    "contacts": contacts,
-                    "organ_status": _whatsapp_status.get("status", "disconnected"),
-                })
-
-            elif msg_type == "whatsapp_get_messages":
-                contact = payload.get("contact")
-                limit = payload.get("limit", 50)
-                messages = await memory.get_whatsapp_messages(contact=contact, limit=limit)
-                await ws.send_json({
-                    "type": "WHATSAPP_MESSAGES",
-                    "contact": contact,
-                    "messages": messages,
-                })
 
     except WebSocketDisconnect:
         manager.disconnect(conn_id)

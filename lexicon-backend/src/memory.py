@@ -217,133 +217,135 @@ class Memory:
         sanitized = _sanitize_for_json(result)
         return list(reversed(sanitized))
 
-    # ── WhatsApp Contacts & Messages ────────────────────
+    # ── Generic Organ Management ──────────────────────────
 
-    async def ensure_whatsapp_contact(self, name: str) -> str:
-        """Create a contact node if it doesn't exist. Returns the contact ID."""
-        if not self.db:
-            return name
-        # Check if contact already exists
-        result = await self.db.query(
-            "SELECT * FROM whatsapp_contact WHERE name = $name",
-            {"name": name},
-        )
-        if result and len(result) > 0:
-            rid = result[0].get("id", name)
-            return str(rid)
-        # Create new contact node
-        await self.db.query(
-            "CREATE whatsapp_contact SET name = $name, "
-            "first_seen = time::now(), last_seen = time::now(), "
-            "message_count = 0",
-            {"name": name},
-        )
-        return name
-
-    async def store_whatsapp_message(self, contact: str, chat: str, text: str,
-                                      timestamp: str, message_id: str,
-                                      unread_count: int = 0):
-        """Store a WhatsApp message and update the contact node."""
-        if not self.db:
-            return
-
-        # Ensure contact exists
-        await self.ensure_whatsapp_contact(contact)
-
-        # Check if this exact message was already stored (dedup)
-        existing = await self.db.query(
-            "SELECT * FROM whatsapp_message WHERE message_id = $mid",
-            {"mid": message_id},
-        )
-        if existing and len(existing) > 0:
-            return  # Already stored
-
-        # Store the message
-        await self.db.query(
-            "CREATE whatsapp_message SET "
-            "contact = $contact, chat = $chat, text = $text, "
-            "timestamp = $ts, message_id = $mid, "
-            "unread_count = $unread, received_at = time::now()",
-            {
-                "contact": contact,
-                "chat": chat,
-                "text": text,
-                "ts": timestamp,
-                "mid": message_id,
-                "unread": unread_count,
-            },
-        )
-
-        # Update contact's last_seen and increment message count
-        await self.db.query(
-            "UPDATE whatsapp_contact SET last_seen = time::now(), "
-            "message_count = message_count + 1 "
-            "WHERE name = $name",
-            {"name": contact},
-        )
-
-    async def get_whatsapp_messages(self, contact: str = None, limit: int = 50):
-        """Get recent WhatsApp messages, optionally filtered by contact."""
-        if not self.db:
-            return []
-
-        if contact:
-            result = await self.db.query(
-                "SELECT * FROM whatsapp_message WHERE contact = $contact "
-                "ORDER BY received_at DESC LIMIT $limit",
-                {"contact": contact, "limit": limit},
-            )
-        else:
-            result = await self.db.query(
-                "SELECT * FROM whatsapp_message "
-                "ORDER BY received_at DESC LIMIT $limit",
-                {"limit": limit},
-            )
-
-        if not result:
-            return []
-
-        sanitized = _sanitize_for_json(result)
-        return list(reversed(sanitized))
-
-    async def get_whatsapp_contacts(self):
-        """Get all known WhatsApp contacts with their message counts."""
+    async def list_organs(self):
+        """Get all registered organs."""
         if not self.db:
             return []
         result = await self.db.query(
-            "SELECT name, message_count, last_seen, first_seen "
-            "FROM whatsapp_contact ORDER BY last_seen DESC"
+            "SELECT organ_id, url, name, created_at FROM organ ORDER BY created_at ASC"
         )
         if not result:
             return []
         return _sanitize_for_json(result)
 
-    async def get_whatsapp_chats_summary(self, limit: int = 20):
-        """Get a summary of recent chats — last message per chat/conversation."""
+    async def get_organ(self, organ_id: str):
+        """Get a single organ by ID."""
+        if not self.db:
+            return None
+        result = await self.db.query(
+            "SELECT * FROM organ WHERE organ_id = $oid",
+            {"oid": organ_id},
+        )
+        if result and len(result) > 0:
+            return _sanitize_for_json(result[0])
+        return None
+
+    async def create_organ(self, organ_id: str, url: str, name: str = ""):
+        """Register a new organ."""
+        if not self.db:
+            return
+        # Check if already exists
+        existing = await self.db.query(
+            "SELECT * FROM organ WHERE organ_id = $oid",
+            {"oid": organ_id},
+        )
+        if existing and len(existing) > 0:
+            # Update URL and name
+            await self.db.query(
+                "UPDATE organ SET url = $url, name = $name WHERE organ_id = $oid",
+                {"oid": organ_id, "url": url, "name": name},
+            )
+            return
+        await self.db.query(
+            "CREATE organ SET organ_id = $oid, url = $url, name = $name, created_at = time::now()",
+            {"oid": organ_id, "url": url, "name": name},
+        )
+
+    async def delete_organ(self, organ_id: str):
+        """Delete an organ and all its data."""
+        if not self.db:
+            return
+        await self.db.query("DELETE organ WHERE organ_id = $oid", {"oid": organ_id})
+        await self.db.query("DELETE scrape_pattern WHERE organ_id = $oid", {"oid": organ_id})
+        await self.db.query("DELETE scraped_data WHERE organ_id = $oid", {"oid": organ_id})
+
+    # ── Scrape Patterns ───────────────────────────────────
+
+    async def save_scrape_pattern(self, organ_id: str, class_name: str,
+                                   outer_html: str, fingerprint: dict):
+        """Save (upsert) a scrape pattern for an organ."""
+        if not self.db:
+            return
+        await self.db.query(
+            "DELETE scrape_pattern WHERE organ_id = $oid AND class_name = $cname",
+            {"oid": organ_id, "cname": class_name},
+        )
+        await self.db.query(
+            "CREATE scrape_pattern SET organ_id = $oid, class_name = $cname, "
+            "outer_html = $ohtml, fingerprint = $fp, updated_at = time::now()",
+            {"oid": organ_id, "cname": class_name, "ohtml": outer_html, "fp": fingerprint},
+        )
+
+    async def get_scrape_patterns(self, organ_id: str) -> list:
+        """Get all scrape patterns for an organ."""
         if not self.db:
             return []
-        # Get the latest message per chat (conversation name, not sender)
         result = await self.db.query(
-            "SELECT contact, chat, text, timestamp, received_at, unread_count "
-            "FROM whatsapp_message "
-            "ORDER BY received_at DESC LIMIT $limit",
-            {"limit": limit * 3},  # Over-fetch, then deduplicate
+            "SELECT class_name, outer_html, fingerprint, updated_at "
+            "FROM scrape_pattern WHERE organ_id = $oid ORDER BY class_name ASC",
+            {"oid": organ_id},
         )
         if not result:
             return []
+        return _sanitize_for_json(result)
 
-        # Sanitize first, then deduplicate
-        sanitized = _sanitize_for_json(result)
+    async def delete_scrape_pattern(self, organ_id: str, class_name: str):
+        """Delete a scrape pattern and its stored data."""
+        if not self.db:
+            return
+        await self.db.query(
+            "DELETE scrape_pattern WHERE organ_id = $oid AND class_name = $cname",
+            {"oid": organ_id, "cname": class_name},
+        )
+        await self.db.query(
+            "DELETE scraped_data WHERE organ_id = $oid AND class_name = $cname",
+            {"oid": organ_id, "cname": class_name},
+        )
 
-        # Deduplicate by chat (conversation name) — keep only the latest message
-        seen_chats = {}
-        for row in sanitized:
-            chat_key = row.get("chat") or row.get("contact", "")
-            if chat_key not in seen_chats:
-                entry = dict(row)
-                entry["chat"] = chat_key
-                seen_chats[chat_key] = entry
-            if len(seen_chats) >= limit:
-                break
+    # ── Scraped Data ──────────────────────────────────────
 
-        return list(seen_chats.values())
+    async def store_scraped_data(self, organ_id: str, class_name: str, values: list):
+        """Store scraped data (replaces previous data for this class)."""
+        if not self.db:
+            return
+        await self.db.query(
+            "DELETE scraped_data WHERE organ_id = $oid AND class_name = $cname",
+            {"oid": organ_id, "cname": class_name},
+        )
+        await self.db.query(
+            "CREATE scraped_data SET organ_id = $oid, class_name = $cname, "
+            "values = $vals, count = $count, scraped_at = time::now()",
+            {"oid": organ_id, "cname": class_name, "vals": values, "count": len(values)},
+        )
+
+    async def get_scraped_data(self, organ_id: str, class_name: str = None) -> list:
+        """Get scraped data for an organ, optionally filtered by class_name."""
+        if not self.db:
+            return []
+        if class_name:
+            result = await self.db.query(
+                "SELECT class_name, values, count, scraped_at "
+                "FROM scraped_data WHERE organ_id = $oid AND class_name = $cname",
+                {"oid": organ_id, "cname": class_name},
+            )
+        else:
+            result = await self.db.query(
+                "SELECT class_name, values, count, scraped_at "
+                "FROM scraped_data WHERE organ_id = $oid ORDER BY class_name ASC",
+                {"oid": organ_id},
+            )
+        if not result:
+            return []
+        return _sanitize_for_json(result)

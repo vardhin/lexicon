@@ -15,7 +15,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND="$SCRIPT_DIR/lexicon-backend"
 SPINE_PORT=5557
-HTTP_PORT=8000
+HTTP_PORT=8765
 
 # ── Try ZeroMQ first (preferred — fastest path) ──
 if [ "$1" != "--http" ]; then

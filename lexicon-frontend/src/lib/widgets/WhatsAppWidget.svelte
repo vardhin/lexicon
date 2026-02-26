@@ -1,13 +1,10 @@
 <!--
   WhatsAppWidget.svelte — WhatsApp dashboard widget.
 
-  The WhatsApp "organ" is a real web.whatsapp.com in a fullscreen child
-  webview overlay. You toggle it via the sidebar 💬 button or from this
-  widget's controls.
-
-  This widget shows:
-    - Organ status (closed / background / visible)
-    - Controls to open/hide/close the WhatsApp overlay
+  The WhatsApp organ runs as a tab in the Playwright ghost browser
+  (managed by the Brain's OrganManager). This widget shows:
+    - Organ status (open/closed in the ghost browser)
+    - Controls to open/close the WhatsApp tab
     - Recent chats grouped by conversation name
     - Message view for a selected chat
 -->
@@ -17,25 +14,19 @@
   export let props = {};
   export let onDismiss = () => {};
 
+  const BRAIN = 'http://127.0.0.1:8000';
+  const WHATSAPP_ORGAN_ID = 'whatsapp';
+  const WHATSAPP_URL = 'https://web.whatsapp.com';
+
   let ws = null;
-  let organStatus = 'closed';   // 'closed' | 'background' | 'visible'
-  let monitorStatus = 'unknown'; // 'connected' | 'waiting_for_qr' | 'disconnected'
+  let organStatus = 'closed';    // 'closed' | 'loading' | 'connected'
+  let monitorStatus = 'unknown';
   let chats = [];
   let messages = [];
   let selectedChat = props?.filter_contact || null;
   let view = selectedChat ? 'messages' : 'chats';
   let loading = true;
-  let tauriInvoke = null;
   let organPollTimer = null;
-
-  if (typeof window !== 'undefined') {
-    import('@tauri-apps/api/core').then(mod => {
-      tauriInvoke = mod.invoke;
-      pollOrganStatus();
-      // Poll organ status every 2 seconds to keep in sync
-      organPollTimer = setInterval(pollOrganStatus, 2000);
-    }).catch(() => {});
-  }
 
   onMount(() => {
     ws = window.__lexicon_ws;
@@ -54,6 +45,8 @@
     }
 
     fetchMonitorStatus();
+    pollOrganStatus();
+    organPollTimer = setInterval(pollOrganStatus, 3000);
   });
 
   onDestroy(() => {
@@ -154,49 +147,49 @@
     else if (msg.type === 'WHATSAPP_STATUS') {
       monitorStatus = msg.status;
     }
-    else if (msg.type === 'WHATSAPP_ORGAN_STATUS') {
-      organStatus = msg.status;
-    }
   }
 
   function fetchMonitorStatus() {
-    fetch('http://127.0.0.1:8000/whatsapp/status')
+    fetch(BRAIN + '/whatsapp/status')
       .then(r => r.json())
       .then(data => { monitorStatus = data.status || 'disconnected'; })
       .catch(() => { monitorStatus = 'disconnected'; });
   }
 
   function pollOrganStatus() {
-    if (!tauriInvoke) return;
-    tauriInvoke('whatsapp_organ_status').then(status => {
-      organStatus = status;
-    }).catch(() => {});
+    fetch(BRAIN + '/organs/' + WHATSAPP_ORGAN_ID + '/status')
+      .then(r => r.json())
+      .then(data => {
+        organStatus = data.running ? (data.status || 'connected') : 'closed';
+      })
+      .catch(() => { organStatus = 'closed'; });
   }
 
-  // ── Organ controls ──
+  // ── Organ controls (via Brain HTTP → Playwright) ──
 
   function openWhatsAppTab() {
-    if (!tauriInvoke) return;
-    tauriInvoke('open_whatsapp_organ').then(() => {
-      organStatus = 'running';
-    }).catch(err => {
-      console.error('Failed to open WhatsApp:', err);
-    });
-  }
-
-  function bringToFront() {
-    if (!tauriInvoke) return;
-    tauriInvoke('show_whatsapp_organ', { visible: true }).then(() => {
-      organStatus = 'running';
-    }).catch(() => {});
+    // Ensure the organ is registered, then launch it
+    fetch(BRAIN + '/organs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ organ_id: WHATSAPP_ORGAN_ID, url: WHATSAPP_URL, name: 'WhatsApp' }),
+    })
+      .then(() => fetch(BRAIN + '/organs/' + WHATSAPP_ORGAN_ID + '/launch', { method: 'POST' }))
+      .then(r => r.json())
+      .then(() => {
+        organStatus = 'loading';
+        setTimeout(pollOrganStatus, 2000);
+      })
+      .catch(err => { console.error('Failed to open WhatsApp:', err); });
   }
 
   function closeWhatsAppTab() {
-    if (!tauriInvoke) return;
-    tauriInvoke('close_whatsapp_organ').then(() => {
-      organStatus = 'closed';
-      monitorStatus = 'disconnected';
-    }).catch(() => {});
+    fetch(BRAIN + '/organs/' + WHATSAPP_ORGAN_ID + '/kill', { method: 'POST' })
+      .then(() => {
+        organStatus = 'closed';
+        monitorStatus = 'disconnected';
+      })
+      .catch(() => {});
   }
 
   function selectChat(chatName) {
@@ -229,13 +222,15 @@
   }
 
   function organStatusColor(s) {
-    if (s === 'running') return '#28c840';
+    if (s === 'connected') return '#28c840';
+    if (s === 'loading') return '#ffbd2e';
     return '#ff5f57';
   }
 
   function organStatusLabel(s) {
-    if (s === 'running') return 'Running';
-    return 'Not Started';
+    if (s === 'connected') return 'Tab Open';
+    if (s === 'loading') return 'Loading…';
+    return 'Closed';
   }
 
   function monitorColor(s) {
@@ -282,13 +277,10 @@
       <button class="wa-tab-btn primary" on:click={openWhatsAppTab}>
         💬 Open WhatsApp
       </button>
-      <span class="wa-tab-hint">Opens web.whatsapp.com in a separate window</span>
+      <span class="wa-tab-hint">Opens web.whatsapp.com in the ghost browser</span>
     {:else}
-      <button class="wa-tab-btn primary" on:click={bringToFront}>
-        ↗ Bring to Front
-      </button>
       <button class="wa-tab-btn danger" on:click={closeWhatsAppTab}>
-        ✕ Close
+        ✕ Close Tab
       </button>
     {/if}
   </div>

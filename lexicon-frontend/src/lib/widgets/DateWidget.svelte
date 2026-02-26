@@ -2,6 +2,7 @@
   DateWidget.svelte — rich date display with day progress.
   Props: { props, onDismiss }
 -->
+<!-- svelte-ignore export_let_unused -->
 <script>
   import { onMount, onDestroy } from 'svelte';
 
