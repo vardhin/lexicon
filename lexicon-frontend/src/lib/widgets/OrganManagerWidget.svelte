@@ -336,17 +336,47 @@
               </span>
             {/if}
           </div>
-          {#if matchPreview.matches && matchPreview.matches.length > 0}
-            <div class="preview-list">
-              {#each matchPreview.matches.slice(0, 20) as m, i}
-                <div class="preview-item">
-                  <span class="preview-idx">{i + 1}</span>
-                  <span class="preview-text">{truncate(m.text || '(empty)', 80)}</span>
-                  <span class="preview-score">{m.score}</span>
+
+          <!-- Show discovered fields so user knows what will be extracted -->
+          {#if matchPreview.fields && matchPreview.fields.length > 0}
+            <div class="fields-header">🔍 Discovered {matchPreview.fields.length} fields:</div>
+            <div class="fields-list">
+              {#each matchPreview.fields.slice(0, 12) as f}
+                <div class="field-chip">
+                  <span class="field-label">{f.label}</span>
+                  <span class="field-type">{f.extract}</span>
+                  {#if f.example}
+                    <span class="field-example">{truncate(f.example, 30)}</span>
+                  {/if}
                 </div>
               {/each}
-              {#if matchPreview.count > 20}
-                <div class="preview-more">... and {matchPreview.count - 20} more</div>
+              {#if matchPreview.fields.length > 12}
+                <div class="field-chip field-more">+{matchPreview.fields.length - 12} more</div>
+              {/if}
+            </div>
+          {/if}
+
+          {#if matchPreview.matches && matchPreview.matches.length > 0}
+            <div class="preview-list">
+              {#each matchPreview.matches.slice(0, 10) as m, i}
+                <div class="preview-item structured">
+                  <span class="preview-idx">{i + 1}</span>
+                  <div class="preview-fields">
+                    {#each Object.entries(m).filter(e => !e[0].startsWith('__') && e[1]) as [k, v]}
+                      <div class="pf-row">
+                        <span class="pf-key">{k}</span>
+                        <span class="pf-val">{truncate(String(v), 60)}</span>
+                      </div>
+                    {/each}
+                    {#if Object.keys(m).filter(k => !k.startsWith('__')).length === 0}
+                      <span class="preview-text">{truncate(m.__text || '(empty)', 80)}</span>
+                    {/if}
+                  </div>
+                  <span class="preview-score">{m.__score || ''}</span>
+                </div>
+              {/each}
+              {#if matchPreview.count > 10}
+                <div class="preview-more">... and {matchPreview.count - 10} more</div>
               {/if}
             </div>
           {:else if matchPreview.error}
@@ -384,7 +414,15 @@
               {#if data && data.values && data.values.length > 0}
                 <div class="data-values">
                   {#each data.values.slice(0, 8) as val, i}
-                    <div class="data-val">{truncate(val, 60)}</div>
+                    {#if typeof val === 'object' && val !== null}
+                      <div class="data-val structured-val">
+                        {#each Object.entries(val).filter(e => !e[0].startsWith('__')).slice(0, 4) as [k, v]}
+                          <span class="sv-pair"><span class="sv-k">{k}:</span> {truncate(String(v), 40)}</span>
+                        {/each}
+                      </div>
+                    {:else}
+                      <div class="data-val">{truncate(String(val), 60)}</div>
+                    {/if}
                   {/each}
                   {#if data.values.length > 8}
                     <div class="data-more">... {data.values.length - 8} more</div>
@@ -415,7 +453,15 @@
             {#if d.values && d.values.length > 0}
               <div class="data-values">
                 {#each d.values.slice(0, 10) as val}
-                  <div class="data-val">{truncate(val, 70)}</div>
+                  {#if typeof val === 'object' && val !== null}
+                    <div class="data-val structured-val">
+                      {#each Object.entries(val).filter(e => !e[0].startsWith('__')).slice(0, 4) as [k, v]}
+                        <span class="sv-pair"><span class="sv-k">{k}:</span> {truncate(String(v), 40)}</span>
+                      {/each}
+                    </div>
+                  {:else}
+                    <div class="data-val">{truncate(String(val), 70)}</div>
+                  {/if}
                 {/each}
                 {#if d.values.length > 10}
                   <div class="data-more">... {d.values.length - 10} more</div>
@@ -658,4 +704,50 @@
   .data-organ { font-weight: 600; font-size: 11px; color: rgba(37,211,102,0.8); }
   .data-class { font-weight: 700; font-size: 12px; color: rgba(100,180,255,0.9); }
   .data-ct { font-size: 10px; color: rgba(255,255,255,0.3); margin-left: auto; }
+
+  /* ── Discovered fields chips ── */
+  .fields-header {
+    font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.5);
+    margin: 6px 0 3px;
+  }
+  .fields-list {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    margin-bottom: 8px;
+  }
+  .field-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; padding: 2px 7px; border-radius: 10px;
+    background: rgba(100,180,255,0.08); border: 1px solid rgba(100,180,255,0.15);
+  }
+  .field-label { color: rgba(100,180,255,0.9); font-weight: 600; }
+  .field-type { color: rgba(255,255,255,0.3); font-size: 9px; }
+  .field-example {
+    color: rgba(255,255,255,0.4); font-size: 9px;
+    max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .field-more { color: rgba(255,255,255,0.25); border-color: rgba(255,255,255,0.06); background: rgba(255,255,255,0.03); }
+
+  /* ── Structured preview items ── */
+  .preview-item.structured {
+    flex-direction: column; align-items: stretch; gap: 2px;
+    padding: 6px 8px;
+  }
+  .preview-fields { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+  .pf-row { display: flex; align-items: baseline; gap: 6px; }
+  .pf-key {
+    font-size: 9.5px; font-weight: 600; color: rgba(100,180,255,0.6);
+    flex-shrink: 0; min-width: 50px;
+  }
+  .pf-val {
+    font-size: 10.5px; color: rgba(255,255,255,0.75);
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* ── Structured data values in patterns ── */
+  .structured-val {
+    display: flex; flex-wrap: wrap; gap: 4px 10px;
+    padding: 4px 6px;
+  }
+  .sv-pair { font-size: 10.5px; color: rgba(255,255,255,0.65); }
+  .sv-k { color: rgba(100,180,255,0.5); font-weight: 600; font-size: 9.5px; }
 </style>

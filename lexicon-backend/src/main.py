@@ -240,24 +240,27 @@ async def organ_match_pattern(organ_id: str, request: Request):
 @app.post("/organs/{organ_id}/scrape")
 async def organ_scrape_pattern(organ_id: str, request: Request):
     """Scrape: paste an outer HTML pattern, name it, and store all matching
-    elements' text content in Memory under that class name.
+    elements as structured data in Memory under that class name.
 
     Body: {
-        "class_name": "contact",
-        "outer_html": "<span class='_ak8j'>...</span>",
+        "class_name": "feed_card",
+        "outer_html": "<div class='rounded-2 py-1'>...</div>",
     }
 
     Flow:
-      1. Fingerprint the outer_html snippet
-      2. Find all similar elements in the organ's live DOM
-      3. Extract text content from each match
-      4. Store all extracted texts in Memory under organ_id + class_name
-      5. Return the matches
+      1. Deep-parse the outer_html to discover inner fields (links, text,
+         images, timestamps, etc.)
+      2. Fingerprint the root element for similarity matching
+      3. Find all similar container elements in the organ's live DOM
+      4. Extract structured data from each match using discovered fields
+      5. Store structured objects in Memory under organ_id + class_name
+      6. Return the matches + discovered field schema
 
     Returns: {
-        "class_name": "contact",
-        "count": 14,
-        "values": ["Alice", "Bob", ...],
+        "class_name": "feed_card",
+        "count": 8,
+        "fields": [{ "label": "user", "extract": "text", "example": "alice" }, ...],
+        "values": [{ "user": "alice", "repo": "myproject", ... }, ...],
         "fingerprint": { tag, classes, attrs },
     }
     """
@@ -267,27 +270,36 @@ async def organ_scrape_pattern(organ_id: str, request: Request):
     if not class_name or not outer_html:
         return {"error": "class_name and outer_html are required"}
 
-    # Match the pattern
+    # Deep match the pattern (structural analysis + field extraction)
     result = await organs.match_pattern(organ_id, outer_html)
     if result.get("error"):
         return result
 
-    # Extract text values
+    # Extract structured values from matches
     values = []
     for m in result.get("matches", []):
-        t = (m.get("text") or "").strip()
-        if t:
-            values.append(t)
+        # Remove internal scoring keys, keep the data
+        item = {k: v for k, v in m.items() if not k.startswith('__') and v}
+        if item:
+            values.append(item)
+        else:
+            # Fallback: if no structured fields, use flat text
+            t = (m.get("__text") or "").strip()
+            if t:
+                values.append(t)
 
     # Store the pattern definition in Memory (so it persists and can be re-scraped)
-    await memory.save_scrape_pattern(organ_id, class_name, outer_html, result.get("fingerprint", {}))
+    fields = result.get("fields", [])
+    await memory.save_scrape_pattern(organ_id, class_name, outer_html,
+                                      result.get("fingerprint", {}), fields)
 
-    # Store the scraped values in Memory
+    # Store the scraped values in Memory (now can be objects OR strings)
     await memory.store_scraped_data(organ_id, class_name, values)
 
     return {
         "class_name": class_name,
         "count": len(values),
+        "fields": result.get("fields", []),
         "values": values,
         "fingerprint": result.get("fingerprint", {}),
     }
@@ -320,9 +332,13 @@ async def organ_rescrape(organ_id: str, request: Request):
         match_result = await organs.match_pattern(organ_id, ohtml)
         values = []
         for m in match_result.get("matches", []):
-            t = (m.get("text") or "").strip()
-            if t:
-                values.append(t)
+            item = {k: v for k, v in m.items() if not k.startswith('__') and v}
+            if item:
+                values.append(item)
+            else:
+                t = (m.get("__text") or "").strip()
+                if t:
+                    values.append(t)
 
         await memory.store_scraped_data(organ_id, cname, values)
         results[cname] = {"count": len(values), "values": values}
@@ -349,6 +365,23 @@ async def organ_get_scraped_data(organ_id: str, class_name: str = None):
     """Get scraped data for an organ, optionally filtered by class_name."""
     data = await memory.get_scraped_data(organ_id, class_name)
     return {"data": data}
+
+
+@app.get("/organs-data/all")
+async def all_organs_data():
+    """Get scraped data from ALL organs — used by the dashboard view."""
+    organs = await memory.list_organs()
+    result = []
+    for organ in organs:
+        oid = organ.get("organ_id", "")
+        if not oid:
+            continue
+        data = await memory.get_scraped_data(oid)
+        for item in data:
+            item["organ_id"] = oid
+            item["organ_name"] = organ.get("name") or oid
+            result.append(item)
+    return {"data": result}
 
 
 @app.websocket("/ws")

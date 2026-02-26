@@ -274,7 +274,8 @@ class Memory:
     # ── Scrape Patterns ───────────────────────────────────
 
     async def save_scrape_pattern(self, organ_id: str, class_name: str,
-                                   outer_html: str, fingerprint: dict):
+                                   outer_html: str, fingerprint: dict,
+                                   fields: list = None):
         """Save (upsert) a scrape pattern for an organ."""
         if not self.db:
             return
@@ -284,8 +285,9 @@ class Memory:
         )
         await self.db.query(
             "CREATE scrape_pattern SET organ_id = $oid, class_name = $cname, "
-            "outer_html = $ohtml, fingerprint = $fp, updated_at = time::now()",
-            {"oid": organ_id, "cname": class_name, "ohtml": outer_html, "fp": fingerprint},
+            "outer_html = $ohtml, fingerprint = $fp, fields = $flds, updated_at = time::now()",
+            {"oid": organ_id, "cname": class_name, "ohtml": outer_html,
+             "fp": fingerprint, "flds": fields or []},
         )
 
     async def get_scrape_patterns(self, organ_id: str) -> list:
