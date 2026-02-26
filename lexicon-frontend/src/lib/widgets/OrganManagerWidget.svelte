@@ -326,7 +326,10 @@
       {#if matchPreview}
         <div class="preview-box">
           <div class="preview-header">
-            <span class="preview-count">{matchPreview.count || 0} matches found</span>
+            <span class="preview-count">{matchPreview.count || 0} unique matches</span>
+            {#if matchPreview.duplicatesSkipped > 0}
+              <span class="preview-dedup">🔁 {matchPreview.duplicatesSkipped} dupes removed</span>
+            {/if}
             {#if matchPreview.fingerprint}
               <span class="preview-fp">
                 &lt;{matchPreview.fingerprint.tag}&gt;
@@ -660,6 +663,10 @@
   .preview-idx { color: rgba(255,255,255,0.25); font-size: 9px; width: 18px; text-align: right; flex-shrink: 0; }
   .preview-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(255,255,255,0.8); }
   .preview-score { font-size: 9px; color: rgba(255,189,46,0.7); flex-shrink: 0; }
+  .preview-dedup {
+    font-size: 9.5px; color: rgba(37,211,102,0.7);
+    background: rgba(37,211,102,0.08); padding: 1px 6px; border-radius: 8px;
+  }
   .preview-more { font-size: 10px; color: rgba(255,255,255,0.25); text-align: center; padding: 4px; }
   .preview-error { font-size: 11px; color: rgba(255,95,87,0.7); }
   .preview-empty { font-size: 11px; color: rgba(255,255,255,0.3); text-align: center; padding: 8px; }

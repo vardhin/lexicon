@@ -386,9 +386,16 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
     """Build JavaScript that finds all matching containers AND extracts
     structured data from each one using the discovered field CSS paths.
 
-    Each match returns an object like:
+    Three-stage pipeline (the "DAG"):
+      Stage 1: SIMILARITY — find candidate containers by root-tag fingerprint
+      Stage 2: STRUCTURAL VALIDATION — extract fields, reject elements where
+               fewer than 40% of expected fields are present (kills sidebars,
+               error dialogs, nav chrome)
+      Stage 3: DEDUPLICATION — content-fingerprint each match, skip duplicates
+               (kills GitHub's double/triple renders of the same card)
+
+    Each surviving match returns a structured object like:
       { user: "alice", repo: "myproject", avatar: "https://...", ... }
-    instead of flat textContent.
     """
     tag = fingerprint.get("tag", "").lower()
     classes = fingerprint.get("classes", [])
@@ -399,6 +406,9 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
 
     classes_json = _js_array(classes)
     attrs_json = _js_object(attrs)
+
+    # Count how many fields we expect (for structural validation)
+    total_fields = len(fields)
 
     # Build field extraction code
     field_extractors = []
@@ -440,15 +450,24 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
         const TAG = {_js_string(tag)};
         const CLASSES = {classes_json};
         const ATTRS = {attrs_json};
+        const EXPECTED_FIELDS = {total_fields};
 
         const totalSignals = 10 + CLASSES.length * 5 + Object.keys(ATTRS).length * 8;
         const threshold = Math.max(10, totalSignals * 0.35);
+
+        // Stage 3 state: deduplication via content fingerprints
+        const seenFingerprints = new Set();
+
+        // Garbage patterns — reject values that are clearly not content
+        const GARBAGE_RE = /^\\s*\\{{|^\\s*\\[|resolvedServerColorMode|data-hydro|Uh oh|reload this page|Skip to content|There was an error/i;
 
         const candidates = document.querySelectorAll(TAG);
         const results = [];
 
         for (let i = 0; i < candidates.length && results.length < 200; i++) {{
             const el = candidates[i];
+
+            // ──── Stage 1: SIMILARITY (root tag fingerprint) ────
             let score = 10;
 
             const elClasses = el.className && typeof el.className === 'string'
@@ -466,25 +485,57 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
                 }}
             }}
 
-            if (score >= threshold) {{
-                const obj = {{}};
-                const _fallbackText = (el.textContent || '').trim().substring(0, 500);
+            if (score < threshold) continue;
 
-                // Extract structured fields
+            // ──── Stage 2: STRUCTURAL VALIDATION ────
+            // Extract fields and count how many are actually present
+            const obj = {{}};
 {extractors_code}
 
-                // Only keep matches that have at least one non-empty field
-                const fieldValues = Object.values(obj);
-                const hasData = fieldValues.some(v => v && v.length > 0);
+            // Count populated fields (non-empty strings)
+            const fieldKeys = Object.keys(obj);
+            const populatedCount = fieldKeys.filter(k => {{
+                const v = obj[k];
+                return v && typeof v === 'string' && v.length > 0;
+            }}).length;
 
-                if (hasData) {{
-                    obj.__score = score;
-                    obj.__text = _fallbackText.substring(0, 200);
-                    results.push(obj);
-                }} else if (_fallbackText) {{
-                    results.push({{ __text: _fallbackText, __score: score }});
+            // Require at least 40% of expected fields to be present
+            // (a sidebar or error dialog will have 0-1 out of 8 fields)
+            const minFields = Math.max(2, Math.ceil(EXPECTED_FIELDS * 0.4));
+            if (populatedCount < minFields) continue;
+
+            // ──── Garbage filter ────
+            // Check if any text field is JSON, error messages, or nav chrome
+            let isGarbage = false;
+            for (const k of fieldKeys) {{
+                const v = obj[k];
+                if (v && typeof v === 'string' && GARBAGE_RE.test(v)) {{
+                    isGarbage = true;
+                    break;
                 }}
             }}
+            if (isGarbage) continue;
+
+            // ──── Stage 3: DEDUPLICATION ────
+            // Build a content fingerprint from the field values
+            // Two cards with the same user + same key content = duplicate
+            const fpParts = [];
+            for (const k of fieldKeys.sort()) {{
+                const v = obj[k];
+                if (v && typeof v === 'string') {{
+                    // Normalize: lowercase, trim, collapse whitespace
+                    fpParts.push(k + ':' + v.toLowerCase().trim().replace(/\\s+/g, ' ').substring(0, 80));
+                }}
+            }}
+            const contentFP = fpParts.join('|');
+
+            if (seenFingerprints.has(contentFP)) continue;
+            seenFingerprints.add(contentFP);
+
+            // ──── Survived all 3 stages — this is a real, unique match ────
+            obj.__score = score;
+            obj.__fieldRatio = populatedCount + '/' + EXPECTED_FIELDS;
+            results.push(obj);
         }}
 
         results.sort((a, b) => (b.__score || 0) - (a.__score || 0));
@@ -492,7 +543,9 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
         return {{
             threshold: threshold,
             totalSignals: totalSignals,
+            expectedFields: EXPECTED_FIELDS,
             count: results.length,
+            duplicatesSkipped: seenFingerprints.size > 0 ? (seenFingerprints.size - results.length) : 0,
             matches: results.slice(0, 100),
         }};
     }})()
@@ -748,6 +801,8 @@ class OrganManager:
                     "fingerprint": fp,
                     "fields": fields,
                     "threshold": result.get("threshold", 0),
+                    "expectedFields": result.get("expectedFields", len(fields)),
+                    "duplicatesSkipped": result.get("duplicatesSkipped", 0),
                     "count": result.get("count", 0),
                     "matches": result.get("matches", []),
                 }
