@@ -23,6 +23,8 @@ from src.entity_resolver import (
     normalize_username, username_similarity,
     # Signal extraction
     extract_signals, IdentitySignals,
+    # Noise filtering
+    is_noise,
     # Strategies
     strategy_fingerprint, strategy_name_similarity,
     strategy_username_match, strategy_token_overlap,
@@ -268,6 +270,258 @@ class TestExtractSignals:
     def test_primary_name_prefers_longest(self):
         sig = IdentitySignals(names=["Rishi", "Rishi Mehta"])
         assert sig.primary_name == "Rishi Mehta"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  NOISE FILTERING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestIsNoise:
+    """Test the is_noise() filter that rejects non-person values."""
+
+    # ── Values that SHOULD be noise (is_noise → True) ──
+
+    def test_time_12h(self):
+        assert is_noise("9:00 PM")
+        assert is_noise("12:30 AM")
+        assert is_noise("9 PM")
+        assert is_noise("11AM")
+
+    def test_time_24h(self):
+        assert is_noise("15:00")
+        assert is_noise("23:59")
+        assert is_noise("0:30")
+        assert is_noise("15:00:00")
+
+    def test_date_slashes(self):
+        assert is_noise("01/02/2025")
+        assert is_noise("1-2-25")
+        assert is_noise("2025-01-02")
+        assert is_noise("2025/01/02")
+
+    def test_date_words(self):
+        assert is_noise("Jan 15")
+        assert is_noise("15 January")
+        assert is_noise("Jan 15, 2025")
+        assert is_noise("December 25")
+        assert is_noise("March 6")
+
+    def test_iso_timestamp(self):
+        assert is_noise("2025-01-02T15:00:00")
+        assert is_noise("2025-01-02T15:00")
+
+    def test_unix_timestamp(self):
+        assert is_noise("1704067200")
+        assert is_noise("1704067200000")
+
+    def test_relative_time_words(self):
+        assert is_noise("yesterday")
+        assert is_noise("Today")
+        assert is_noise("TOMORROW")
+        assert is_noise("now")
+        assert is_noise("just now")
+        assert is_noise("last night")
+        assert is_noise("this morning")
+
+    def test_relative_time_phrases(self):
+        assert is_noise("2 hours ago")
+        assert is_noise("5 minutes ago")
+        assert is_noise("5m ago")
+        assert is_noise("2h ago")
+        assert is_noise("a few seconds ago")
+        assert is_noise("in 3 days")
+
+    def test_day_names(self):
+        assert is_noise("Monday")
+        assert is_noise("tuesday")
+        assert is_noise("Wed")
+        assert is_noise("sun")
+
+    def test_month_names(self):
+        assert is_noise("January")
+        assert is_noise("feb")
+        assert is_noise("December")
+
+    def test_status_words(self):
+        assert is_noise("online")
+        assert is_noise("offline")
+        assert is_noise("typing")
+        assert is_noise("typing...")
+        assert is_noise("seen")
+        assert is_noise("delivered")
+        assert is_noise("read")
+
+    def test_ui_labels(self):
+        assert is_noise("unknown")
+        assert is_noise("n/a")
+        assert is_noise("none")
+        assert is_noise("null")
+        assert is_noise("undefined")
+        assert is_noise("anonymous")
+
+    def test_generic_nouns(self):
+        assert is_noise("message")
+        assert is_noise("messages")
+        assert is_noise("photo")
+        assert is_noise("video")
+        assert is_noise("file")
+
+    def test_pure_digits(self):
+        assert is_noise("12345")
+        assert is_noise("00")
+
+    def test_pure_punctuation(self):
+        assert is_noise("---")
+        assert is_noise("***")
+        assert is_noise("!!!")
+
+    def test_low_alpha_ratio(self):
+        assert is_noise("12:34:56")
+        assert is_noise("2025/01/02")
+
+    def test_empty_and_short(self):
+        assert is_noise("")
+        assert is_noise("A")
+        assert is_noise(" ")
+
+    def test_too_long_sentence(self):
+        assert is_noise("This is a very long message that someone sent in a chat and it should not be treated as a person name")
+
+    def test_too_many_words(self):
+        assert is_noise("I went to the store and bought some food")
+
+    def test_whatsapp_noise(self):
+        assert is_noise("this message was deleted")
+        assert is_noise("missed voice call")
+        assert is_noise("end-to-end encrypted")
+
+    # ── Values that should NOT be noise (is_noise → False) ──
+
+    def test_real_names_pass(self):
+        assert not is_noise("Rishi Mehta")
+        assert not is_noise("John Smith")
+        assert not is_noise("Aadhya")
+        assert not is_noise("María García")
+        assert not is_noise("Jean-Pierre")
+
+    def test_real_names_various_cases(self):
+        assert not is_noise("rishi mehta")
+        assert not is_noise("RISHI MEHTA")
+        assert not is_noise("Rishi")
+
+    def test_usernames_pass(self):
+        """Usernames with alpha chars should not be noise."""
+        assert not is_noise("rishimehta04")
+        assert not is_noise("john_doe")
+
+    def test_short_real_names(self):
+        assert not is_noise("Li")
+        assert not is_noise("Wu")
+        assert not is_noise("Al")
+
+    def test_names_with_titles(self):
+        assert not is_noise("Dr. Smith")
+        assert not is_noise("Mr. Johnson")
+
+    def test_three_word_name(self):
+        assert not is_noise("Mary Jane Watson")
+
+
+class TestNoiseInExtractSignals:
+    """Test that noise values are filtered during signal extraction."""
+
+    def test_time_not_extracted_as_name(self):
+        sig = extract_signals("9:00 PM", "whatsapp", "chat")
+        assert sig.names == []
+
+    def test_yesterday_not_extracted_as_name(self):
+        sig = extract_signals("yesterday", "whatsapp", "chat")
+        assert sig.names == []
+
+    def test_date_not_extracted_as_name(self):
+        sig = extract_signals("Jan 15, 2025", "whatsapp", "chat")
+        assert sig.names == []
+
+    def test_relative_time_not_extracted_as_name(self):
+        sig = extract_signals("2 hours ago", "whatsapp", "chat")
+        assert sig.names == []
+
+    def test_day_name_not_extracted_as_name(self):
+        sig = extract_signals("Monday", "whatsapp", "chat")
+        assert sig.names == []
+
+    def test_dict_time_field_not_name(self):
+        """Even if a time value appears in a 'title' or 'text' field,
+        it should not be treated as a name."""
+        item = {"name": "Rishi Mehta", "title": "yesterday", "text": "9:00 PM"}
+        sig = extract_signals(item, "whatsapp", "contact")
+        assert "Rishi Mehta" in sig.names
+        assert "yesterday" not in sig.names
+        assert "9:00 PM" not in sig.names
+
+    def test_real_name_still_extracted(self):
+        sig = extract_signals("Rishi Mehta", "whatsapp", "chat")
+        assert "Rishi Mehta" in sig.names
+
+    def test_dict_with_mixed_noise_and_names(self):
+        item = {
+            "name": "Aadhya",
+            "text": "today",
+            "heading": "15:00",
+            "title": "2 hours ago",
+        }
+        sig = extract_signals(item, "whatsapp", "chat")
+        assert "Aadhya" in sig.names
+        assert "today" not in sig.names
+        assert "15:00" not in sig.names
+        assert "2 hours ago" not in sig.names
+
+    def test_noise_items_have_no_identity(self):
+        """A scraped item with only noise values should have no identity."""
+        item = {"text": "yesterday", "title": "9:00 PM"}
+        sig = extract_signals(item, "whatsapp", "chat")
+        assert not sig.has_identity
+
+
+class TestTokenizeNameNoiseFiltering:
+    """Test that noise tokens are excluded from tokenization."""
+
+    def test_yesterday_not_in_tokens(self):
+        tokens = tokenize_name("yesterday")
+        assert "yesterday" not in tokens
+
+    def test_today_not_in_tokens(self):
+        tokens = tokenize_name("today")
+        assert "today" not in tokens
+
+    def test_real_name_tokens_preserved(self):
+        tokens = tokenize_name("Rishi Mehta")
+        assert "rishi" in tokens
+        assert "mehta" in tokens
+
+    def test_mixed_name_and_noise(self):
+        """If a name happens to contain a noise word, only the noise
+        word is filtered — the real tokens survive."""
+        tokens = tokenize_name("Rishi Monday Mehta")
+        assert "rishi" in tokens
+        assert "mehta" in tokens
+        assert "monday" not in tokens
+
+
+class TestCanonicalNameNoise:
+    """Test that canonical name selection filters noise aliases."""
+
+    def test_prefers_name_over_noise(self):
+        result = choose_canonical_name(["yesterday", "Rishi Mehta", "9:00 PM"])
+        assert result == "Rishi Mehta"
+
+    def test_all_noise_returns_first(self):
+        result = choose_canonical_name(["yesterday", "today"])
+        assert result == "yesterday"  # Fallback: return first raw alias
+
+    def test_filters_time_from_candidates(self):
+        result = choose_canonical_name(["15:00", "John Smith"])
+        assert result == "John Smith"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

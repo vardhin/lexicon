@@ -1,31 +1,23 @@
 <!--
   PersonWidget.svelte — Entity/Person node dashboard.
 
-  Fetches resolved entity nodes from the Brain and renders them as
-  rich profile cards using the DataView meta node primitives.
-
-  Modes:
-    - List mode (default): shows all entities in a searchable grid
-    - Detail mode (props.entity_id): shows a single entity's full profile
-
-  Conventions:
-    - All root elements have lx-* CSS anchor classes for theme injection
-    - All inner layout is composed from DataView meta node primitives
-      (card, stack, row, grid, avatar, text, badge, pair, stat, divider)
-    - The widget uses svelte:self recursion through DataViewWidget for
-      rendering the layout tree
-    - Accepts props: { entity_id?, title?, auto_refresh?, refresh_interval? }
+  Features:
+    - List mode: searchable grid of all entities with stats
+    - Detail mode: full profile with expandable source data records
+    - Delete: single entity delete button + clear all with confirmation
+    - Each source record is individually expandable to inspect raw data
+    - Organ name is shown as a field inside each data record
 
   Props:
     entity_id       — (optional) show a single entity. Omit for list mode.
     title           — (optional) custom widget title
     auto_refresh    — (optional) poll for updates
     refresh_interval — (optional) poll interval in ms (default 15000)
+    search_query    — (optional) pre-fill search
 -->
 <!-- svelte-ignore export_let_unused -->
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import DataViewWidget from './DataViewWidget.svelte';
 
   export let props = {};
   export let onDismiss = () => {};
@@ -41,6 +33,7 @@
   let loading = true;
   let error = null;
   let timer = null;
+  let confirmClear = false;
 
   // List mode state
   let entities = [];
@@ -50,6 +43,9 @@
 
   // Detail mode state
   let entity = null;
+
+  // Track which source records are expanded (by index)
+  let expandedSources = {};
 
   onMount(() => {
     if (entityId) {
@@ -102,7 +98,6 @@
       } else {
         entity = json.entity;
         if (!entityId) {
-          // We're in list mode but viewing a detail — update selected
           selectedEntity = entity;
         }
       }
@@ -142,15 +137,47 @@
     }
   }
 
+  async function deleteEntity(eid) {
+    try {
+      await fetch(BRAIN + '/entities/' + encodeURIComponent(eid), { method: 'DELETE' });
+      if (selectedEntity && selectedEntity.entity_id === eid) {
+        selectedEntity = null;
+        entity = null;
+      }
+      await fetchEntities();
+    } catch (e) {
+      error = e.message || 'Delete failed';
+    }
+  }
+
+  async function clearAllEntities() {
+    try {
+      await fetch(BRAIN + '/entities', { method: 'DELETE' });
+      entities = [];
+      stats = {};
+      selectedEntity = null;
+      entity = null;
+      confirmClear = false;
+    } catch (e) {
+      error = e.message || 'Clear failed';
+    }
+  }
+
   function selectEntity(ent) {
     selectedEntity = ent;
     entity = ent;
+    expandedSources = {};
   }
 
   function backToList() {
     selectedEntity = null;
     entity = null;
+    expandedSources = {};
     fetchEntities();
+  }
+
+  function toggleSource(idx) {
+    expandedSources = { ...expandedSources, [idx]: !expandedSources[idx] };
   }
 
   function getInitials(name) {
@@ -170,307 +197,81 @@
     return 'hsla(' + hue + ', 60%, 50%, 0.25)';
   }
 
-  function formatSourceLabel(src) {
-    var organ = src.organ_id || 'unknown';
-    var cls = src.class_name || '';
-    return cls ? organ + ' / ' + cls : organ;
-  }
-
   function pluralize(n, singular, plural) {
     return n === 1 ? n + ' ' + singular : n + ' ' + (plural || singular + 's');
   }
 
-  // Build a layout tree for a single entity (detail view)
-  function buildDetailLayout(ent) {
-    var children = [];
-
-    // ── Header: avatar + name + aliases ──
-    var avatarUrl = (ent.avatars && ent.avatars.length > 0) ? ent.avatars[0] : null;
-    var headerChildren = [];
-
-    if (avatarUrl) {
-      headerChildren.push({ type: 'avatar', imgUrl: avatarUrl, size: 'lg' });
-    } else {
-      headerChildren.push({
-        type: 'avatar', initials: getInitials(ent.canonical_name),
-        color: getAvatarColor(ent.canonical_name), size: 'lg',
-      });
-    }
-
-    var nameStack = [
-      { type: 'text', value: ent.canonical_name || 'Unknown', variant: 'h1' },
-    ];
-
-    // Aliases (excluding the canonical name itself)
-    var otherAliases = (ent.aliases || []).filter(function (a) {
-      return a.toLowerCase() !== (ent.canonical_name || '').toLowerCase();
-    });
-    if (otherAliases.length > 0) {
-      nameStack.push({
-        type: 'text', value: 'aka ' + otherAliases.join(', '), variant: 'caption',
-      });
-    }
-
-    headerChildren.push({ type: 'stack', gap: 2, children: nameStack });
-
-    children.push({
-      type: 'row', gap: 12, align: 'center',
-      children: headerChildren,
-    });
-
-    // ── Badges: source count, multi-source indicator ──
-    var badgeRow = [];
-    var sourceCount = (ent.sources || []).length;
-    if (sourceCount > 0) {
-      badgeRow.push({ type: 'badge', value: pluralize(sourceCount, 'source'), color: 'blue' });
-    }
-    if (sourceCount > 1) {
-      badgeRow.push({ type: 'badge', value: '✦ cross-linked', color: 'purple' });
-    }
-    if (badgeRow.length > 0) {
-      children.push({ type: 'row', gap: 6, wrap: true, children: badgeRow });
-    }
-
-    children.push({ type: 'divider' });
-
-    // ── Usernames ──
-    if (ent.usernames && ent.usernames.length > 0) {
-      var usernameBadges = [];
-      for (var i = 0; i < ent.usernames.length; i++) {
-        usernameBadges.push({ type: 'badge', value: '@' + ent.usernames[i], color: 'cyan' });
-      }
-      children.push({
-        type: 'stack', gap: 4, children: [
-          { type: 'text', value: 'HANDLES', variant: 'label' },
-          { type: 'row', gap: 4, wrap: true, children: usernameBadges },
-        ],
-      });
-    }
-
-    // ── Contact info ──
-    var contactPairs = [];
-    if (ent.phones && ent.phones.length > 0) {
-      for (var j = 0; j < ent.phones.length; j++) {
-        contactPairs.push({ type: 'pair', key: '📞 Phone', value: ent.phones[j] });
-      }
-    }
-    if (ent.emails && ent.emails.length > 0) {
-      for (var k = 0; k < ent.emails.length; k++) {
-        contactPairs.push({ type: 'pair', key: '📧 Email', value: ent.emails[k] });
-      }
-    }
-    if (contactPairs.length > 0) {
-      children.push({
-        type: 'stack', gap: 4, children: [
-          { type: 'text', value: 'CONTACT', variant: 'label' },
-          ...contactPairs,
-        ],
-      });
-    }
-
-    // ── Avatar gallery (if multiple) ──
-    if (ent.avatars && ent.avatars.length > 1) {
-      var avatarNodes = [];
-      for (var a = 0; a < ent.avatars.length; a++) {
-        avatarNodes.push({ type: 'avatar', imgUrl: ent.avatars[a], size: 'sm' });
-      }
-      children.push({
-        type: 'stack', gap: 4, children: [
-          { type: 'text', value: 'AVATARS', variant: 'label' },
-          { type: 'row', gap: 6, wrap: true, children: avatarNodes },
-        ],
-      });
-    }
-
-    children.push({ type: 'divider' });
-
-    // ── Sources: where this person was seen ──
-    if (ent.sources && ent.sources.length > 0) {
-      var sourceCards = [];
-      // Group by organ_id
-      var byOrgan = {};
-      for (var s = 0; s < ent.sources.length; s++) {
-        var src = ent.sources[s];
-        var oid = src.organ_id || 'unknown';
-        if (!byOrgan[oid]) byOrgan[oid] = [];
-        byOrgan[oid].push(src);
-      }
-
-      var organIds = Object.keys(byOrgan);
-      for (var o = 0; o < organIds.length; o++) {
-        var oSources = byOrgan[organIds[o]];
-        var sourceChildren = [
-          {
-            type: 'row', gap: 6, align: 'center', children: [
-              { type: 'text', value: '🧬', variant: 'body' },
-              { type: 'text', value: organIds[o], variant: 'h3' },
-              { type: 'badge', value: pluralize(oSources.length, 'record'), color: 'dim' },
-            ],
-          },
-        ];
-
-        // Show class names
-        var classNames = {};
-        for (var cs = 0; cs < oSources.length; cs++) {
-          var cn = oSources[cs].class_name || 'data';
-          classNames[cn] = (classNames[cn] || 0) + 1;
-        }
-        var classBadges = [];
-        var cnKeys = Object.keys(classNames);
-        for (var ci = 0; ci < cnKeys.length; ci++) {
-          classBadges.push({
-            type: 'badge',
-            value: cnKeys[ci] + ' (' + classNames[cnKeys[ci]] + ')',
-            color: 'blue',
-          });
-        }
-        if (classBadges.length > 0) {
-          sourceChildren.push({ type: 'row', gap: 4, wrap: true, children: classBadges });
-        }
-
-        sourceCards.push({
-          type: 'card', variant: 'subtle', padding: 'sm',
-          children: sourceChildren,
-        });
-      }
-
-      children.push({
-        type: 'stack', gap: 4, children: [
-          { type: 'text', value: 'SOURCES', variant: 'label' },
-          ...sourceCards,
-        ],
-      });
-    }
-
-    return { type: 'stack', gap: 10, children: children };
-  }
-
-  // Build a layout tree for the entity list view
-  function buildListLayout() {
-    var children = [];
-
-    // Stats bar
-    var totalEntities = stats.total_entities || entities.length;
-    var multiSource = stats.multi_source_entities || 0;
-
-    children.push({
-      type: 'row', gap: 12, align: 'center', justify: 'center',
-      children: [
-        { type: 'stat', value: String(totalEntities), label: 'People', color: 'rgba(124,138,255,0.95)' },
-        { type: 'stat', value: String(multiSource), label: 'Cross-linked', color: 'rgba(167,139,250,0.95)' },
-      ],
-    });
-
-    children.push({ type: 'divider' });
-
-    // Entity cards
-    if (entities.length === 0) {
-      children.push({
-        type: 'card', variant: 'ghost',
-        children: [
-          { type: 'text', value: 'No entities resolved yet.', variant: 'caption' },
-          { type: 'text', value: 'Scrape data from organs — entities are auto-resolved.', variant: 'caption' },
-        ],
-      });
-    } else {
-      var cards = [];
-      for (var i = 0; i < entities.length; i++) {
-        var ent = entities[i];
-        cards.push(buildEntityCard(ent));
-      }
-
-      // Grid for few, stack for many
-      if (cards.length <= 6) {
-        children.push({
-          type: 'grid', cols: cards.length <= 3 ? cards.length : 3, gap: 8,
-          children: cards,
-        });
+  /** Format raw data as a flat list of key-value pairs for display. */
+  function flattenRaw(raw) {
+    if (!raw) return [];
+    if (typeof raw === 'string') return [{ key: 'value', val: raw }];
+    if (typeof raw !== 'object') return [{ key: 'value', val: String(raw) }];
+    var pairs = [];
+    var keys = Object.keys(raw);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var v = raw[k];
+      if (v === null || v === undefined || v === '') continue;
+      if (typeof v === 'object') {
+        pairs.push({ key: k, val: JSON.stringify(v, null, 2), isJson: true });
       } else {
-        children.push({
-          type: 'grid', cols: 3, gap: 8,
-          children: cards,
-        });
+        var s = String(v);
+        var isImg = isImageUrl(s);
+        pairs.push({ key: k, val: s, isImage: isImg });
       }
     }
-
-    return { type: 'stack', gap: 8, children: children };
+    return pairs;
   }
 
-  // Build a compact entity card for the list view
-  function buildEntityCard(ent) {
-    var avatarUrl = (ent.avatars && ent.avatars.length > 0) ? ent.avatars[0] : null;
-    var cardChildren = [];
-
-    // Avatar + name row
-    var headerChildren = [];
-    if (avatarUrl) {
-      headerChildren.push({ type: 'avatar', imgUrl: avatarUrl, size: 'sm' });
-    } else {
-      headerChildren.push({
-        type: 'avatar', initials: getInitials(ent.canonical_name),
-        color: getAvatarColor(ent.canonical_name), size: 'sm',
-      });
-    }
-    headerChildren.push({
-      type: 'text', value: ent.canonical_name || 'Unknown', variant: 'h3',
-    });
-    cardChildren.push({
-      type: 'row', gap: 6, align: 'center', children: headerChildren,
-    });
-
-    // Username badges
-    if (ent.usernames && ent.usernames.length > 0) {
-      var uBadges = [];
-      for (var u = 0; u < Math.min(2, ent.usernames.length); u++) {
-        uBadges.push({ type: 'badge', value: '@' + ent.usernames[u], color: 'cyan' });
-      }
-      if (ent.usernames.length > 2) {
-        uBadges.push({ type: 'badge', value: '+' + (ent.usernames.length - 2), color: 'dim' });
-      }
-      cardChildren.push({ type: 'row', gap: 4, wrap: true, children: uBadges });
-    }
-
-    // Source count
-    var sourceCount = (ent.sources || []).length;
-    if (sourceCount > 0) {
-      var metaChildren = [
-        { type: 'badge', value: pluralize(sourceCount, 'source'), color: 'blue' },
-      ];
-      if (sourceCount > 1) {
-        metaChildren.push({ type: 'badge', value: '✦', color: 'purple' });
-      }
-      cardChildren.push({ type: 'row', gap: 4, children: metaChildren });
-    }
-
-    return {
-      type: 'card', variant: 'subtle', padding: 'sm',
-      style: 'cursor: pointer;',
-      children: cardChildren,
-      // __entity_id is used by the click handler — not rendered
-      __entity_id: ent.entity_id,
-    };
+  /** Check if a URL points to an image (avatar/profile pic). */
+  function isImageUrl(url) {
+    if (!url) return false;
+    if (url.startsWith('data:image/')) return true;
+    if (url.startsWith('blob:')) return true;
+    if (/\.(?:jpg|jpeg|png|gif|webp|svg|bmp|avif)(?:\?|#|$)/i.test(url)) return true;
+    if (/(?:pps\.whatsapp\.net|avatars?\d*\.githubusercontent|pbs\.twimg|scontent|gravatar\.com\/avatar|cdn\.discord)/i.test(url)) return true;
+    return false;
   }
 
-  $: listLayout = (!selectedEntity && !entityId) ? buildListLayout() : null;
-  $: detailLayout = (selectedEntity || entity) ? buildDetailLayout(selectedEntity || entity) : null;
+  $: currentEntity = selectedEntity || entity;
+  $: showingDetail = !!currentEntity;
+  $: showingList = !showingDetail;
 </script>
 
 <div class="person-widget lx-person lx-widget">
   <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
 
+  <!-- ═══ HEADER ═══ -->
   <div class="pw-header lx-person-header">
     {#if selectedEntity && !entityId}
       <button class="pw-back lx-person-back" on:click={backToList}>← Back</button>
     {/if}
-    <div class="pw-title lx-person-title">{selectedEntity ? (selectedEntity.canonical_name || 'Person') : title}</div>
+    <div class="pw-title lx-person-title">
+      {showingDetail ? (currentEntity.canonical_name || 'Person') : title}
+    </div>
     <div class="pw-actions">
-      {#if !selectedEntity && !entityId}
+      {#if showingDetail}
+        <button
+          class="pw-action pw-action-danger lx-person-action"
+          on:click={() => deleteEntity(currentEntity.entity_id)}
+          title="Delete this person"
+        >🗑</button>
+      {:else}
         <button class="pw-action lx-person-action" on:click={resolveAll} title="Re-resolve all entities">⟳</button>
+        {#if entities.length > 0}
+          {#if confirmClear}
+            <button class="pw-action pw-action-danger-confirm" on:click={clearAllEntities} title="Confirm clear all">Yes, clear all</button>
+            <button class="pw-action" on:click={() => { confirmClear = false; }} title="Cancel">✕</button>
+          {:else}
+            <button class="pw-action pw-action-danger lx-person-action" on:click={() => { confirmClear = true; }} title="Clear all people">🗑</button>
+          {/if}
+        {/if}
       {/if}
     </div>
   </div>
 
-  {#if !selectedEntity && !entityId}
+  <!-- ═══ SEARCH (list mode only) ═══ -->
+  {#if showingList}
     <div class="pw-search lx-person-search">
       <input
         class="pw-search-input lx-input"
@@ -482,36 +283,169 @@
     </div>
   {/if}
 
+  <!-- ═══ BODY ═══ -->
   <div class="pw-body lx-person-body">
     {#if loading}
       <div class="pw-empty lx-person-empty">Loading…</div>
+
     {:else if error}
       <div class="pw-empty pw-error lx-person-error">❌ {error}</div>
-    {:else if detailLayout}
-      <DataViewWidget props={{ __node: detailLayout }} onDismiss={() => {}} />
-    {:else if listLayout}
-      <!-- Render list with click handlers on entity cards -->
-      <div class="pw-list">
-        {#if entities.length === 0}
-          <DataViewWidget props={{ __node: listLayout }} onDismiss={() => {}} />
-        {:else}
-          <!-- Stats -->
-          <div class="pw-stats">
-            <DataViewWidget
-              props={{ __node: {
-                type: 'row', gap: 12, align: 'center', justify: 'center',
-                children: [
-                  { type: 'stat', value: String(stats.total_entities || entities.length), label: 'People', color: 'rgba(124,138,255,0.95)' },
-                  { type: 'stat', value: String(stats.multi_source_entities || 0), label: 'Cross-linked', color: 'rgba(167,139,250,0.95)' },
-                ],
-              }}}
-              onDismiss={() => {}}
-            />
+
+    <!-- ═══ DETAIL VIEW ═══ -->
+    {:else if showingDetail}
+      <div class="pw-detail">
+        <!-- Avatar + name -->
+        <div class="pw-detail-header">
+          {#if currentEntity.avatars && currentEntity.avatars.length > 0}
+            <div class="pw-avatar pw-avatar-lg lx-person-avatar">
+              <img src={currentEntity.avatars[0]} alt="" />
+            </div>
+          {:else}
+            <div class="pw-avatar pw-avatar-lg pw-avatar-initials lx-person-avatar"
+                 style="background: {getAvatarColor(currentEntity.canonical_name)}">
+              {getInitials(currentEntity.canonical_name)}
+            </div>
+          {/if}
+          <div class="pw-detail-name-block">
+            <div class="pw-detail-name lx-person-name">{currentEntity.canonical_name || 'Unknown'}</div>
+            {#if currentEntity.aliases && currentEntity.aliases.filter(a => a.toLowerCase() !== (currentEntity.canonical_name || '').toLowerCase()).length > 0}
+              <div class="pw-detail-aliases">
+                aka {currentEntity.aliases.filter(a => a.toLowerCase() !== (currentEntity.canonical_name || '').toLowerCase()).join(', ')}
+              </div>
+            {/if}
           </div>
+        </div>
 
-          <div class="pw-divider"></div>
+        <!-- Badges -->
+        <div class="pw-badge-row">
+          {#if (currentEntity.sources || []).length > 0}
+            <span class="pw-badge pw-badge-blue">{pluralize((currentEntity.sources || []).length, 'source')}</span>
+          {/if}
+          {#if (currentEntity.sources || []).length > 1}
+            <span class="pw-badge pw-badge-purple">✦ cross-linked</span>
+          {/if}
+        </div>
 
-          <!-- Clickable entity cards -->
+        <div class="pw-divider"></div>
+
+        <!-- Usernames -->
+        {#if currentEntity.usernames && currentEntity.usernames.length > 0}
+          <div class="pw-section">
+            <div class="pw-section-label">HANDLES</div>
+            <div class="pw-badge-row">
+              {#each currentEntity.usernames as uname}
+                <span class="pw-badge pw-badge-cyan">@{uname}</span>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <!-- Contact info -->
+        {#if (currentEntity.phones && currentEntity.phones.length > 0) || (currentEntity.emails && currentEntity.emails.length > 0)}
+          <div class="pw-section">
+            <div class="pw-section-label">CONTACT</div>
+            {#if currentEntity.phones}
+              {#each currentEntity.phones as phone}
+                <div class="pw-pair"><span class="pw-pair-key">📞 Phone</span><span class="pw-pair-val">{phone}</span></div>
+              {/each}
+            {/if}
+            {#if currentEntity.emails}
+              {#each currentEntity.emails as email}
+                <div class="pw-pair"><span class="pw-pair-key">📧 Email</span><span class="pw-pair-val">{email}</span></div>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Avatar gallery -->
+        {#if currentEntity.avatars && currentEntity.avatars.length > 1}
+          <div class="pw-section">
+            <div class="pw-section-label">AVATARS</div>
+            <div class="pw-avatar-gallery">
+              {#each currentEntity.avatars as av}
+                <div class="pw-avatar pw-avatar-sm"><img src={av} alt="" /></div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <div class="pw-divider"></div>
+
+        <!-- ═══ DATA RECORDS — all sources shown flat, visible at a glance ═══ -->
+        {#if currentEntity.sources && currentEntity.sources.length > 0}
+          <div class="pw-section">
+            <div class="pw-section-label">DATA ({currentEntity.sources.length})</div>
+
+            {#each currentEntity.sources as src, idx}
+              <div class="pw-source-flat">
+                <!-- Source header badge row -->
+                <div class="pw-source-tag-row">
+                  <span class="pw-source-idx">#{idx + 1}</span>
+                  <span class="pw-badge pw-badge-dim">{src.organ_id || 'unknown'}</span>
+                  {#if src.class_name}
+                    <span class="pw-badge pw-badge-blue">{src.class_name}</span>
+                  {/if}
+                </div>
+
+                <!-- All raw data fields — always visible -->
+                <div class="pw-source-fields">
+                  {#if src.raw}
+                    {#each flattenRaw(src.raw) as field}
+                      <div class="pw-data-pair" class:pw-data-pair-json={field.isJson}>
+                        <span class="pw-data-key">{field.key}</span>
+                        {#if field.isImage}
+                          <img class="pw-data-img" src={field.val} alt="" />
+                        {:else if field.isJson}
+                          <pre class="pw-data-json">{field.val}</pre>
+                        {:else}
+                          <span class="pw-data-val">{field.val}</span>
+                        {/if}
+                      </div>
+                    {/each}
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- Entity ID -->
+        <div class="pw-section pw-section-meta">
+          <div class="pw-pair">
+            <span class="pw-pair-key">Entity ID</span>
+            <span class="pw-pair-val pw-pair-mono">{currentEntity.entity_id}</span>
+          </div>
+        </div>
+      </div>
+
+    <!-- ═══ LIST VIEW ═══ -->
+    {:else if showingList}
+      <div class="pw-list">
+        <div class="pw-stats-row">
+          <div class="pw-stat">
+            <span class="pw-stat-value">{stats.total_entities || entities.length}</span>
+            <span class="pw-stat-label">People</span>
+          </div>
+          <div class="pw-stat">
+            <span class="pw-stat-value pw-stat-purple">{stats.multi_source_entities || 0}</span>
+            <span class="pw-stat-label">Cross-linked</span>
+          </div>
+          {#if stats.buffered_signals > 0}
+            <div class="pw-stat">
+              <span class="pw-stat-value pw-stat-amber">{stats.buffered_signals}</span>
+              <span class="pw-stat-label">Buffered</span>
+            </div>
+          {/if}
+        </div>
+
+        <div class="pw-divider"></div>
+
+        {#if entities.length === 0}
+          <div class="pw-empty-hint">
+            <div>No entities resolved yet.</div>
+            <div class="pw-empty-sub">Scrape data from organs — entities are auto-resolved.</div>
+          </div>
+        {:else}
           <div class="pw-grid" class:pw-grid-few={entities.length <= 3}>
             {#each entities as ent}
               <button class="pw-entity-card lx-person-card" on:click={() => selectEntity(ent)}>
@@ -521,7 +455,8 @@
                       <img src={ent.avatars[0]} alt="" />
                     </div>
                   {:else}
-                    <div class="pw-avatar pw-avatar-initials lx-person-avatar" style="background: {getAvatarColor(ent.canonical_name)}">
+                    <div class="pw-avatar pw-avatar-initials lx-person-avatar"
+                         style="background: {getAvatarColor(ent.canonical_name)}">
                       {getInitials(ent.canonical_name)}
                     </div>
                   {/if}
@@ -545,6 +480,7 @@
           </div>
         {/if}
       </div>
+
     {:else}
       <div class="pw-empty">No data</div>
     {/if}
@@ -553,8 +489,7 @@
 
 <style>
   /* ═══════════════════════════════════════════════
-     ROOT — PersonWidget container
-     All classes have lx-* anchors for theme injection.
+     ROOT
      ═══════════════════════════════════════════════ */
   .person-widget {
     position: relative; width: 100%; height: 100%;
@@ -594,35 +529,37 @@
     font-family: inherit; flex-shrink: 0;
   }
   .pw-back:hover { color: rgba(255,255,255,0.9); background: rgba(255,255,255,0.1); }
-  .pw-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .pw-actions { display: flex; gap: 4px; flex-shrink: 0; align-items: center; }
   .pw-action {
     background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08);
     color: rgba(255,255,255,0.5); font-size: 14px; width: 26px; height: 26px;
     border-radius: 6px; cursor: pointer; display: flex; align-items: center;
-    justify-content: center; flex-shrink: 0;
+    justify-content: center; flex-shrink: 0; font-family: inherit;
   }
   .pw-action:hover { color: rgba(255,255,255,0.9); background: rgba(255,255,255,0.1); }
+  .pw-action-danger:hover { color: #ff5f57; background: rgba(255,95,87,0.12); border-color: rgba(255,95,87,0.2); }
+  .pw-action-danger-confirm {
+    background: rgba(255,95,87,0.15); border: 1px solid rgba(255,95,87,0.3);
+    color: #ff5f57; font-size: 10px; width: auto; height: 26px;
+    border-radius: 6px; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; flex-shrink: 0; padding: 0 10px;
+    font-family: inherit; font-weight: 600;
+  }
+  .pw-action-danger-confirm:hover { background: rgba(255,95,87,0.25); }
 
   /* ── Search ── */
-  .pw-search {
-    margin-bottom: 8px; flex-shrink: 0;
-  }
+  .pw-search { margin-bottom: 8px; flex-shrink: 0; }
   .pw-search-input {
     width: 100%; padding: 6px 12px;
     background: rgba(255,255,255,0.04);
     border: 1px solid rgba(255,255,255,0.08);
     border-radius: 8px;
     color: rgba(255,255,255,0.9);
-    font-size: 12px;
-    font-family: inherit;
-    outline: none;
-    box-sizing: border-box;
+    font-size: 12px; font-family: inherit;
+    outline: none; box-sizing: border-box;
   }
   .pw-search-input::placeholder { color: rgba(255,255,255,0.25); }
-  .pw-search-input:focus {
-    border-color: rgba(124,138,255,0.4);
-    background: rgba(255,255,255,0.06);
-  }
+  .pw-search-input:focus { border-color: rgba(124,138,255,0.4); background: rgba(255,255,255,0.06); }
 
   /* ── Body ── */
   .pw-body {
@@ -637,14 +574,34 @@
     text-align: center; padding: 20px;
   }
   .pw-error { color: rgba(255,95,87,0.6); }
-
-  /* ── Stats ── */
-  .pw-stats { margin-bottom: 4px; }
+  .pw-empty-hint {
+    text-align: center; padding: 24px 16px;
+    color: rgba(255,255,255,0.25); font-size: 12px;
+  }
+  .pw-empty-sub { margin-top: 4px; font-size: 11px; color: rgba(255,255,255,0.15); }
 
   .pw-divider {
-    height: 1px;
-    background: rgba(255,255,255,0.06);
-    margin: 4px 0 8px;
+    height: 1px; background: rgba(255,255,255,0.06);
+    margin: 6px 0;
+  }
+
+  /* ── Stats row ── */
+  .pw-stats-row {
+    display: flex; gap: 16px; justify-content: center;
+    padding: 4px 0;
+  }
+  .pw-stat { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .pw-stat-value {
+    font-size: 18px; font-weight: 800;
+    color: rgba(124,138,255,0.95);
+    line-height: 1.2;
+  }
+  .pw-stat-purple { color: rgba(167,139,250,0.95); }
+  .pw-stat-amber { color: rgba(251,191,36,0.85); }
+  .pw-stat-label {
+    font-size: 9px; font-weight: 600;
+    color: rgba(255,255,255,0.3);
+    text-transform: uppercase; letter-spacing: 0.5px;
   }
 
   /* ── Entity card grid ── */
@@ -653,84 +610,152 @@
     grid-template-columns: repeat(3, 1fr);
     gap: 6px;
   }
-  .pw-grid-few {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  }
+  .pw-grid-few { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
 
   .pw-entity-card {
     background: rgba(255,255,255,0.03);
     border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 10px;
-    padding: 10px;
+    border-radius: 10px; padding: 10px;
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s, transform 0.1s;
-    text-align: left;
-    font-family: inherit;
-    color: inherit;
+    text-align: left; font-family: inherit; color: inherit;
   }
   .pw-entity-card:hover {
     background: rgba(255,255,255,0.06);
     border-color: rgba(124,138,255,0.2);
     transform: translateY(-1px);
   }
-  .pw-entity-card:active {
-    transform: translateY(0);
-  }
+  .pw-entity-card:active { transform: translateY(0); }
 
-  .pw-card-inner {
-    display: flex; align-items: center; gap: 8px;
-    min-width: 0;
-  }
+  .pw-card-inner { display: flex; align-items: center; gap: 8px; min-width: 0; }
 
   .pw-avatar {
-    width: 28px; height: 28px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    overflow: hidden;
-    display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+    overflow: hidden; display: flex; align-items: center; justify-content: center;
     font-size: 10px; font-weight: 700;
     color: rgba(255,255,255,0.9);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    text-transform: uppercase; letter-spacing: 0.5px;
   }
-  .pw-avatar img {
-    width: 100%; height: 100%; object-fit: cover;
-    border-radius: 50%;
-  }
+  .pw-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+  .pw-avatar-lg { width: 42px; height: 42px; font-size: 14px; }
+  .pw-avatar-sm { width: 24px; height: 24px; font-size: 9px; }
 
-  .pw-card-info {
-    flex: 1; min-width: 0;
-  }
+  .pw-card-info { flex: 1; min-width: 0; }
   .pw-card-name {
-    font-size: 12px; font-weight: 600;
-    color: rgba(255,255,255,0.85);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    line-height: 1.3;
+    font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.85);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3;
   }
   .pw-card-handle {
-    font-size: 10px;
-    color: rgba(100,200,255,0.6);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    line-height: 1.3;
+    font-size: 10px; color: rgba(100,200,255,0.6);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3;
+  }
+  .pw-card-meta { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+  .pw-cross-badge { font-size: 10px; color: rgba(167,139,250,0.8); }
+  .pw-source-count {
+    font-size: 9px; font-weight: 600; color: rgba(255,255,255,0.25);
+    background: rgba(255,255,255,0.05); padding: 1px 5px; border-radius: 8px;
   }
 
-  .pw-card-meta {
-    display: flex; align-items: center; gap: 3px;
+  .pw-list { display: flex; flex-direction: column; gap: 4px; }
+
+  /* ═══════════════════════════════════════════════
+     DETAIL VIEW
+     ═══════════════════════════════════════════════ */
+  .pw-detail { display: flex; flex-direction: column; gap: 8px; }
+
+  .pw-detail-header { display: flex; align-items: center; gap: 10px; }
+  .pw-detail-name-block { flex: 1; min-width: 0; }
+  .pw-detail-name {
+    font-size: 16px; font-weight: 800; color: rgba(255,255,255,0.95); line-height: 1.25;
+  }
+  .pw-detail-aliases {
+    font-size: 11px; color: rgba(255,255,255,0.3); margin-top: 2px;
+    font-style: italic;
+  }
+
+  /* ── Section ── */
+  .pw-section { display: flex; flex-direction: column; gap: 4px; }
+  .pw-section-label {
+    font-size: 9px; font-weight: 700; color: rgba(255,255,255,0.25);
+    text-transform: uppercase; letter-spacing: 0.8px;
+  }
+  .pw-section-meta { margin-top: 8px; opacity: 0.5; }
+
+  /* ── Badges ── */
+  .pw-badge-row { display: flex; flex-wrap: wrap; gap: 4px; }
+  .pw-badge {
+    font-size: 10px; font-weight: 600;
+    padding: 2px 8px; border-radius: 6px;
+    display: inline-flex; align-items: center;
+  }
+  .pw-badge-blue { background: rgba(59,130,246,0.15); color: rgba(96,165,250,0.9); }
+  .pw-badge-purple { background: rgba(139,92,246,0.15); color: rgba(167,139,250,0.9); }
+  .pw-badge-cyan { background: rgba(34,211,238,0.1); color: rgba(100,200,255,0.8); }
+  .pw-badge-dim { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.35); }
+
+  /* ── Key-Value pairs ── */
+  .pw-pair {
+    display: flex; gap: 8px; align-items: baseline;
+    font-size: 11px; line-height: 1.4;
+  }
+  .pw-pair-key { color: rgba(255,255,255,0.35); flex-shrink: 0; min-width: 70px; }
+  .pw-pair-val { color: rgba(255,255,255,0.8); word-break: break-word; }
+  .pw-pair-mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 10px; color: rgba(255,255,255,0.3); }
+
+  /* ── Avatar gallery ── */
+  .pw-avatar-gallery { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  /* ═══════════════════════════════════════════════
+     DATA RECORDS — flat source entries (visible at a glance)
+     ═══════════════════════════════════════════════ */
+  .pw-source-flat {
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 8px;
+    overflow: hidden;
+    padding: 8px 10px;
+    background: rgba(255,255,255,0.02);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+
+  .pw-source-tag-row {
+    display: flex; align-items: center; gap: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .pw-source-idx {
+    font-size: 10px; font-weight: 600; color: rgba(255,255,255,0.2);
     flex-shrink: 0;
   }
-  .pw-cross-badge {
-    font-size: 10px;
-    color: rgba(167,139,250,0.8);
-  }
-  .pw-source-count {
-    font-size: 9px; font-weight: 600;
-    color: rgba(255,255,255,0.25);
-    background: rgba(255,255,255,0.05);
-    padding: 1px 5px; border-radius: 8px;
+
+  .pw-source-fields {
+    display: flex; flex-direction: column; gap: 3px;
   }
 
-  /* ── List container ── */
-  .pw-list {
-    display: flex; flex-direction: column; gap: 4px;
+  .pw-data-pair {
+    display: flex; gap: 8px; align-items: baseline;
+    font-size: 11px; line-height: 1.4;
+  }
+  .pw-data-pair-json { align-items: flex-start; }
+  .pw-data-key {
+    color: rgba(124,138,255,0.6); font-weight: 600;
+    flex-shrink: 0; min-width: 60px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 10px;
+  }
+  .pw-data-val {
+    color: rgba(255,255,255,0.7); word-break: break-word;
+    font-size: 11px;
+  }
+  .pw-data-img {
+    width: 32px; height: 32px; border-radius: 6px;
+    object-fit: cover; flex-shrink: 0;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .pw-data-json {
+    color: rgba(255,255,255,0.5); font-size: 10px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    margin: 0; white-space: pre-wrap; word-break: break-word;
+    background: rgba(0,0,0,0.2); padding: 4px 6px; border-radius: 4px;
+    line-height: 1.4;
   }
 </style>

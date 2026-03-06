@@ -422,6 +422,8 @@ async def list_entities():
     """List all resolved entity nodes (person nodes)."""
     entities = await memory.list_entities()
     stats = await memory.get_entity_stats()
+    buffered = await memory.list_buffered_signals()
+    stats["buffered_signals"] = len(buffered)
     return {"entities": entities, "stats": stats}
 
 
@@ -453,7 +455,8 @@ async def resolve_all_entities():
 async def resolve_organ_entities(organ_id: str):
     """Resolve entities from a specific organ's scraped data."""
     data = await memory.get_scraped_data(organ_id)
-    total_stats = {"created": 0, "merged": 0, "skipped": 0}
+    total_stats = {"created": 0, "merged": 0, "skipped": 0,
+                   "buffered": 0, "promoted": 0}
     for dataset in data:
         cname = dataset.get("class_name", "")
         values = dataset.get("values", [])
@@ -463,6 +466,8 @@ async def resolve_organ_entities(organ_id: str):
         total_stats["created"] += stats["created"]
         total_stats["merged"] += stats["merged"]
         total_stats["skipped"] += stats["skipped"]
+        total_stats["buffered"] += stats.get("buffered", 0)
+        total_stats["promoted"] += stats.get("promoted", 0)
     return {"status": "ok", "stats": total_stats}
 
 
@@ -607,6 +612,55 @@ async def websocket_endpoint(ws: WebSocket):
                                 "themes": themes,
                                 "active": active,
                             })
+                            continue
+
+                        # ── Entity management actions ──
+
+                        if action.get("type") == "ENTITY_CLEAR":
+                            await memory.clear_entities()
+                            await ws.send_json({
+                                "type": "FEEDBACK",
+                                "message": "🗑️ All people cleared",
+                            })
+                            continue
+
+                        if action.get("type") == "ENTITY_DELETE":
+                            eid = action.get("entity_id", "")
+                            ent = await memory.get_entity(eid)
+                            if ent:
+                                name = ent.get("canonical_name", eid)
+                                await memory.delete_entity(eid)
+                                await ws.send_json({
+                                    "type": "FEEDBACK",
+                                    "message": f"🗑️ Deleted {name}",
+                                })
+                            else:
+                                await ws.send_json({
+                                    "type": "FEEDBACK",
+                                    "message": f"Entity '{eid}' not found",
+                                })
+                            continue
+
+                        if action.get("type") == "ENTITY_DELETE_BY_NAME":
+                            query = action.get("query", "")
+                            results = await memory.search_entities(query)
+                            if results:
+                                # Delete the best match (first result)
+                                ent = results[0]
+                                eid = ent.get("entity_id", "")
+                                name = ent.get("canonical_name", query)
+                                await memory.delete_entity(eid)
+                                await ws.send_json({
+                                    "type": "FEEDBACK",
+                                    "message": f"🗑️ Deleted {name}"
+                                    + (f" ({len(results)-1} others matched)"
+                                       if len(results) > 1 else ""),
+                                })
+                            else:
+                                await ws.send_json({
+                                    "type": "FEEDBACK",
+                                    "message": f"No person matching '{query}' found",
+                                })
                             continue
 
                         await ws.send_json(action)

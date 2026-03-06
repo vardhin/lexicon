@@ -625,6 +625,54 @@ class Memory:
         if not self.db:
             return
         await self.db.query("DELETE entity")
+        await self.db.query("DELETE entity_buffer")
+
+    # ── Entity Buffer (weak signals awaiting correlation) ──
+
+    async def buffer_entity_signal(self, buffer_id: str, signals: dict,
+                                    organ_id: str, class_name: str,
+                                    item_index: int):
+        """Store a weak identity signal in the buffer for later correlation."""
+        if not self.db:
+            return
+        await self.db.query(
+            "CREATE entity_buffer SET "
+            "buffer_id = $bid, signals = $sig, organ_id = $oid, "
+            "class_name = $cname, item_index = $idx, "
+            "created_at = time::now()",
+            {
+                "bid": buffer_id,
+                "sig": signals,
+                "oid": organ_id,
+                "cname": class_name,
+                "idx": item_index,
+            },
+        )
+
+    async def list_buffered_signals(self) -> list:
+        """Get all buffered identity signals."""
+        if not self.db:
+            return []
+        result = await self.db.query(
+            "SELECT buffer_id, signals, organ_id, class_name, item_index, "
+            "created_at FROM entity_buffer ORDER BY created_at ASC"
+        )
+        return _sanitize_for_json(result) if result else []
+
+    async def remove_buffered_signal(self, buffer_id: str):
+        """Remove a buffered signal (after promotion to entity)."""
+        if not self.db:
+            return
+        await self.db.query(
+            "DELETE entity_buffer WHERE buffer_id = $bid",
+            {"bid": buffer_id},
+        )
+
+    async def clear_entity_buffer(self):
+        """Clear the entire entity buffer."""
+        if not self.db:
+            return
+        await self.db.query("DELETE entity_buffer")
 
     async def get_entity_stats(self) -> dict:
         """Get stats about the entity graph."""

@@ -5,12 +5,19 @@ Opens the PersonWidget, which shows either:
   - A searchable grid of all resolved people (list mode)
   - A single person's full profile card (detail mode)
 
+Supports management commands:
+  - Delete a specific person by name or entity ID
+  - Clear all people from the knowledge graph
+
 Usage:
   "people"              → show all resolved person nodes
   "person Rishi"        → search for a specific person
   "contacts"            → alias for people
   "who is Rishi"        → search by name
   "entity <id>"         → show specific entity by ID
+  "delete person Rishi" → delete a person by name
+  "delete entity <id>"  → delete a specific entity by ID
+  "clear people"        → delete all people
 """
 
 import re
@@ -34,9 +41,43 @@ _entity_re = re.compile(
     re.IGNORECASE,
 )
 
+# ── Delete / clear patterns ──
+
+_delete_entity_re = re.compile(
+    r'^(?:delete|remove|rm)\s+entity\s+([a-f0-9]+)$',
+    re.IGNORECASE,
+)
+
+_delete_person_re = re.compile(
+    r'^(?:delete|remove|rm|forget)\s+(?:person|contact|people)\s+(.+)$',
+    re.IGNORECASE,
+)
+
+_clear_re = re.compile(
+    r'^(?:clear|reset|wipe|delete\s+all|remove\s+all)\s+'
+    r'(?:people|persons|contacts|entities)$',
+    re.IGNORECASE,
+)
+
 
 def match(text):
     text = text.strip()
+
+    # Clear all people (check first — more specific than list)
+    if _clear_re.match(text):
+        return {'mode': 'clear'}
+
+    # Delete entity by ID
+    m = _delete_entity_re.match(text)
+    if m:
+        return {'mode': 'delete_entity', 'entity_id': m.group(1)}
+
+    # Delete person by name
+    m = _delete_person_re.match(text)
+    if m:
+        query = m.group(1).strip()
+        if query:
+            return {'mode': 'delete_person', 'query': query}
 
     # List mode
     if _list_re.match(text):
@@ -60,6 +101,27 @@ def match(text):
 def action(text, match_result):
     mode = match_result.get('mode', 'list')
 
+    # ── Clear all entities ──
+    if mode == 'clear':
+        return {
+            "type": "ENTITY_CLEAR",
+        }
+
+    # ── Delete by entity ID ──
+    if mode == 'delete_entity':
+        return {
+            "type": "ENTITY_DELETE",
+            "entity_id": match_result['entity_id'],
+        }
+
+    # ── Delete by person name (search + delete) ──
+    if mode == 'delete_person':
+        return {
+            "type": "ENTITY_DELETE_BY_NAME",
+            "query": match_result['query'],
+        }
+
+    # ── Detail view ──
     if mode == 'detail':
         entity_id = match_result['entity_id']
         return {
@@ -74,6 +136,7 @@ def action(text, match_result):
             },
         }
 
+    # ── Search view ──
     if mode == 'search':
         query = match_result['query']
         return {
@@ -109,13 +172,14 @@ EXTENSION = {
     "help": {
         "title": "People",
         "icon": "👥",
-        "description": "View resolved person nodes from scraped data — cross-source identity graph",
+        "description": "View, search, and manage resolved person nodes — cross-source identity graph",
         "examples": [
             "people",
             "person Rishi",
             "who is Mehta",
             "contacts",
-            "entities",
+            "delete person Rishi",
+            "clear people",
         ],
     },
 }
