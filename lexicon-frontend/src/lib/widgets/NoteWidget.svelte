@@ -22,9 +22,9 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="note-widget">
-  <button class="dismiss" on:click={onDismiss}>✕</button>
-  <div class="label">NOTE</div>
+<div class="note-widget lx-note">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
+  <div class="label lx-label">NOTE</div>
 
   {#if editing}
     <textarea

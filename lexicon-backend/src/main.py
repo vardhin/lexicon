@@ -40,6 +40,28 @@ async def lifespan(app: FastAPI):
 
     spine.on("lexicon/toggle", handle_toggle)
 
+    # Register theme handler: when any script publishes to lexicon/theme,
+    # look up the theme CSS and broadcast APPLY_THEME to all clients.
+    async def handle_theme(channel: str, payload: str):
+        theme_name = payload.strip()
+        if not theme_name:
+            return
+        theme = await memory.get_theme(theme_name)
+        if theme:
+            await memory.set_active_theme(theme_name)
+            await manager.broadcast({
+                "type": "APPLY_THEME",
+                "name": theme_name,
+                "css": theme.get("css", ""),
+            })
+        else:
+            await manager.broadcast({
+                "type": "FEEDBACK",
+                "message": f"Theme '{theme_name}' not found",
+            })
+
+    spine.on("lexicon/theme", handle_theme)
+
     yield
     print("🧠 Lexicon Brain shutting down...")
     await organs.stop()
@@ -419,6 +441,17 @@ async def websocket_endpoint(ws: WebSocket):
             "organs": registered_organs,
         })
 
+        # Restore active theme on connect
+        active_theme_name = await memory.get_active_theme()
+        if active_theme_name:
+            theme = await memory.get_theme(active_theme_name)
+            if theme:
+                await ws.send_json({
+                    "type": "APPLY_THEME",
+                    "name": active_theme_name,
+                    "css": theme.get("css", ""),
+                })
+
         while True:
             raw = await ws.receive_text()
             try:
@@ -439,6 +472,48 @@ async def websocket_endpoint(ws: WebSocket):
                             and action.get("widget_type") == "help"
                         ):
                             action.setdefault("props", {})["entries"] = engine.get_help_entries()
+
+                        # ── Theme actions from the theme extension ──
+                        if action.get("type") == "THEME_APPLY":
+                            theme_name = action.get("name", "")
+                            theme = await memory.get_theme(theme_name)
+                            if theme:
+                                await memory.set_active_theme(theme_name)
+                                await manager.broadcast({
+                                    "type": "APPLY_THEME",
+                                    "name": theme_name,
+                                    "css": theme.get("css", ""),
+                                })
+                            else:
+                                await ws.send_json({
+                                    "type": "FEEDBACK",
+                                    "message": f"Theme '{theme_name}' not found. Type 'themes' to list available.",
+                                })
+                            continue
+
+                        if action.get("type") == "THEME_RESET":
+                            await memory.set_active_theme(None)
+                            await manager.broadcast({
+                                "type": "APPLY_THEME",
+                                "name": "",
+                                "css": "",
+                            })
+                            await ws.send_json({
+                                "type": "FEEDBACK",
+                                "message": "Theme reset to default",
+                            })
+                            continue
+
+                        if action.get("type") == "THEME_LIST_REQUEST":
+                            themes = await memory.list_themes()
+                            active = await memory.get_active_theme()
+                            await ws.send_json({
+                                "type": "THEME_LIST",
+                                "themes": themes,
+                                "active": active,
+                            })
+                            continue
+
                         await ws.send_json(action)
 
             elif msg_type == "save_state":
@@ -562,6 +637,107 @@ async def websocket_endpoint(ws: WebSocket):
                         "workspaces": workspaces,
                         "current": await memory.get_current_workspace(),
                     })
+
+            # ── Theme operations ──
+
+            elif msg_type == "list_themes":
+                themes = await memory.list_themes()
+                active = await memory.get_active_theme()
+                await ws.send_json({
+                    "type": "THEME_LIST",
+                    "themes": themes,
+                    "active": active,
+                })
+
+            elif msg_type == "create_theme":
+                name = payload.get("name", "").strip()
+                css = payload.get("css", "").strip()
+                description = payload.get("description", "").strip()
+                if name and css:
+                    await memory.create_theme(name, css, description)
+                    await ws.send_json({
+                        "type": "FEEDBACK",
+                        "message": f"Theme '{name}' saved",
+                    })
+                    # Send updated theme list
+                    themes = await memory.list_themes()
+                    active = await memory.get_active_theme()
+                    await ws.send_json({
+                        "type": "THEME_LIST",
+                        "themes": themes,
+                        "active": active,
+                    })
+                else:
+                    await ws.send_json({
+                        "type": "FEEDBACK",
+                        "message": "Theme name and CSS are required",
+                    })
+
+            elif msg_type == "apply_theme":
+                name = payload.get("name", "").strip()
+                if name:
+                    theme = await memory.get_theme(name)
+                    if theme:
+                        await memory.set_active_theme(name)
+                        # Broadcast to ALL clients so every connected Body updates
+                        await manager.broadcast({
+                            "type": "APPLY_THEME",
+                            "name": name,
+                            "css": theme.get("css", ""),
+                        })
+                    else:
+                        await ws.send_json({
+                            "type": "FEEDBACK",
+                            "message": f"Theme '{name}' not found",
+                        })
+
+            elif msg_type == "reset_theme":
+                await memory.set_active_theme(None)
+                await manager.broadcast({
+                    "type": "APPLY_THEME",
+                    "name": "",
+                    "css": "",
+                })
+
+            elif msg_type == "delete_theme":
+                name = payload.get("name", "").strip()
+                if name:
+                    active = await memory.get_active_theme()
+                    await memory.delete_theme(name)
+                    # If the deleted theme was active, reset
+                    if active == name:
+                        await memory.set_active_theme(None)
+                        await manager.broadcast({
+                            "type": "APPLY_THEME",
+                            "name": "",
+                            "css": "",
+                        })
+                    await ws.send_json({
+                        "type": "FEEDBACK",
+                        "message": f"Theme '{name}' deleted",
+                    })
+                    themes = await memory.list_themes()
+                    active_now = await memory.get_active_theme()
+                    await ws.send_json({
+                        "type": "THEME_LIST",
+                        "themes": themes,
+                        "active": active_now,
+                    })
+
+            elif msg_type == "get_theme":
+                name = payload.get("name", "").strip()
+                if name:
+                    theme = await memory.get_theme(name)
+                    if theme:
+                        await ws.send_json({
+                            "type": "THEME_INFO",
+                            "theme": theme,
+                        })
+                    else:
+                        await ws.send_json({
+                            "type": "FEEDBACK",
+                            "message": f"Theme '{name}' not found",
+                        })
 
     except WebSocketDisconnect:
         manager.disconnect(conn_id)

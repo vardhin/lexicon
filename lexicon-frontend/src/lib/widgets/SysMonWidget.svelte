@@ -49,9 +49,9 @@
   }
 </script>
 
-<div class="sysmon-widget">
-  <button class="dismiss" on:click={onDismiss}>✕</button>
-  <div class="label">SYSTEM</div>
+<div class="sysmon-widget lx-sysmon">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
+  <div class="label lx-label">SYSTEM</div>
 
   {#if error}
     <div class="err">Could not reach /system endpoint</div>

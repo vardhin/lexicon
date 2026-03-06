@@ -19,11 +19,11 @@
   let tipIdx = Math.floor(Math.random() * tips.length);
 </script>
 
-<div class="help-widget">
-  <button class="dismiss" on:click={onDismiss}>✕</button>
+<div class="help-widget lx-help">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
 
-  <div class="header">
-    <div class="label">LEXICON HELP</div>
+  <div class="header lx-help-header">
+    <div class="label lx-label">LEXICON HELP</div>
     <div class="subtitle">{entries.length} commands available</div>
   </div>
 

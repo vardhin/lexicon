@@ -296,13 +296,27 @@ def discover_fields(html: str) -> dict:
     # Fingerprint = root element (same as before)
     fp = {
         "tag": root.tag,
-        "classes": root.classes[:10],
+        "classes": [],
         "attrs": {},
     }
+
+    # Classify classes: separate semantic classes from CSS-in-JS hashes
+    # CSS-in-JS hashes look like: x1iyjqo2, x6ikm8r (x + alphanumeric)
+    semantic_classes = []
+    hash_classes = []
+    for c in root.classes:
+        if re.match(r'^x[a-z0-9]{4,}$', c):
+            hash_classes.append(c)
+        else:
+            semantic_classes.append(c)
+
+    # Prefer semantic classes, fall back to a limited set of hash classes
+    fp["classes"] = (semantic_classes[:6] + hash_classes[:4])[:10]
+
     keep_attrs = [
         "role", "aria-label", "data-testid", "data-view-component",
         "data-hovercard-type", "type", "name", "data-tab",
-        "aria-selected", "aria-expanded",
+        "aria-selected", "aria-expanded", "dir",
     ]
     for k in keep_attrs:
         if k in root.attrs and root.attrs[k]:
@@ -311,9 +325,15 @@ def discover_fields(html: str) -> dict:
         if k.startswith("data-") and k not in _NOISE_ATTRS and v and len(v) < 100:
             fp["attrs"][k] = v
 
+    # Special: if the element has a 'title' attribute, record that we require
+    # its PRESENCE (not its exact value — the value changes per item)
+    if 'title' in root.attrs:
+        fp["attrs"]["__has_title"] = "1"
+
     # Walk tree and discover fields
     fields = []
     seen_labels = {}
+    seen_values = set()   # Track values we've already captured (dedup)
 
     def walk(node, path_parts):
         if _should_skip(node):
@@ -324,7 +344,13 @@ def discover_fields(html: str) -> dict:
 
         has_attr_data = node.tag in _ATTR_TAGS
 
-        if is_leaf_text or has_attr_data:
+        # Elements with a title attribute carry semantic data
+        # (WhatsApp uses <span title="Contact Name">Contact Name</span>)
+        has_title_attr = (node.attrs.get('title', '').strip() and
+                          len(node.attrs.get('title', '')) < 200 and
+                          node.tag in ('span', 'div', 'a', 'img', 'p', 'button'))
+
+        if is_leaf_text or has_attr_data or has_title_attr:
             label = _auto_label(node, path_parts)
             css_path = _build_css_path(node, root)
 
@@ -335,6 +361,23 @@ def discover_fields(html: str) -> dict:
             if node.tag == 'img':
                 extract_type = 'src'
                 example = node.attrs.get('src', '')[:150]
+                # Also extract the alt text — it often contains the contact/
+                # group name (e.g. WhatsApp: <img alt="Group Name" src="...">)
+                alt = node.attrs.get('alt', '').strip()
+                if alt and len(alt) > 1 and len(alt) < 200:
+                    # Don't add if it's just "@username profile" or similar noise
+                    alt_is_noise = (alt.startswith('@') and 'profile' in alt.lower())
+                    if not alt_is_noise:
+                        alt_label = label + '_name' if label != 'image' else 'name'
+                        if alt_label not in seen_labels:
+                            seen_labels[alt_label] = 1
+                            seen_values.add(alt.lower().strip())
+                            fields.append({
+                                "label": alt_label,
+                                "css_path": css_path,
+                                "extract": "alt",
+                                "example": alt[:100],
+                            })
             elif node.tag in ('relative-time', 'time'):
                 extract_type = 'datetime'
                 example = node.attrs.get('datetime', node.text or '')[:60]
@@ -345,12 +388,46 @@ def discover_fields(html: str) -> dict:
                     # Add href as separate field
                     href_label = label + '_url' if label != 'link' else 'url'
                     if href_label not in seen_labels:
-                        seen_labels[href_label] = True
+                        seen_labels[href_label] = 1
                         fields.append({
                             "label": href_label,
                             "css_path": css_path,
                             "extract": "href",
                             "example": href[:150],
+                        })
+
+            # If element has title attr and the value is NOT already captured
+            # (e.g. already got the same name from <img alt>), use title extract
+            if has_title_attr and node.tag != 'img':
+                title_val = node.attrs.get('title', '').strip()
+                title_norm = title_val.lower().strip()
+
+                # Skip if we already captured this exact value from another
+                # source (e.g. <img alt="upendra kv"> already gave us "name")
+                if title_norm in seen_values:
+                    # This span is redundant — skip the entire field
+                    # (recurse children but don't add this node)
+                    tag_hint = node.tag if node.tag not in ('div', 'span') else ''
+                    for child in node.children:
+                        walk(child, path_parts + ([tag_hint] if tag_hint else []))
+                    return
+
+                # If textContent matches title exactly, prefer title extract
+                if (node.text or '').strip() == title_val:
+                    extract_type = 'title'
+                    example = title_val[:100]
+                    seen_values.add(title_norm)
+                else:
+                    # Different text vs title: add title as separate field
+                    title_label = label + '_title' if not label.startswith('name') else label + '_full'
+                    if title_label not in seen_labels:
+                        seen_labels[title_label] = 1
+                        seen_values.add(title_norm)
+                        fields.append({
+                            "label": title_label,
+                            "css_path": css_path,
+                            "extract": "title",
+                            "example": title_val[:100],
                         })
 
             # De-duplicate labels
@@ -431,6 +508,16 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
                 f"        try {{ const _e = el.querySelector('{css_escaped}'); "
                 f"if (_e) obj['{label_escaped}'] = _e.getAttribute('src') || ''; }} catch(_) {{}}"
             )
+        elif extract == 'alt':
+            field_extractors.append(
+                f"        try {{ const _e = el.querySelector('{css_escaped}'); "
+                f"if (_e) obj['{label_escaped}'] = (_e.getAttribute('alt') || '').trim(); }} catch(_) {{}}"
+            )
+        elif extract == 'title':
+            field_extractors.append(
+                f"        try {{ const _e = el.querySelector('{css_escaped}'); "
+                f"if (_e) obj['{label_escaped}'] = (_e.getAttribute('title') || _e.textContent || '').trim().substring(0, 500); }} catch(_) {{}}"
+            )
         elif extract == 'href':
             field_extractors.append(
                 f"        try {{ const _e = el.querySelector('{css_escaped}'); "
@@ -451,6 +538,7 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
         const CLASSES = {classes_json};
         const ATTRS = {attrs_json};
         const EXPECTED_FIELDS = {total_fields};
+        const IS_LEAF = EXPECTED_FIELDS <= 2;
 
         const totalSignals = 10 + CLASSES.length * 5 + Object.keys(ATTRS).length * 8;
         const threshold = Math.max(10, totalSignals * 0.35);
@@ -478,6 +566,12 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
             }}
 
             for (const [k, v] of Object.entries(ATTRS)) {{
+                // Special: __has_title means "element must HAVE a title attribute"
+                // (we don't check the value — it changes per item)
+                if (k === '__has_title') {{
+                    if (el.hasAttribute('title')) score += 8;
+                    continue;
+                }}
                 const av = el.getAttribute(k);
                 if (av !== null) {{
                     if (av === v) score += 8;
@@ -488,9 +582,26 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
             if (score < threshold) continue;
 
             // ──── Stage 2: STRUCTURAL VALIDATION ────
-            // Extract fields and count how many are actually present
+            // Extract fields. For leaf elements (the element IS the data,
+            // not a container), extract from el itself, not querySelector.
             const obj = {{}};
+
+            if (IS_LEAF) {{
+                // Leaf mode: the element itself is the data source
+                // Extract text/title/alt/src directly from el
+                const titleVal = (el.getAttribute('title') || '').trim();
+                const textVal = (el.textContent || '').trim().substring(0, 500);
+                const srcVal = (el.getAttribute('src') || '').trim();
+                const altVal = (el.getAttribute('alt') || '').trim();
+
+                if (titleVal) obj['name'] = titleVal;
+                else if (textVal) obj['text'] = textVal;
+                if (srcVal) obj['image'] = srcVal;
+                if (altVal && !obj['name']) obj['name'] = altVal;
+            }} else {{
+                // Container mode: use CSS selectors to extract inner fields
 {extractors_code}
+            }}
 
             // Count populated fields (non-empty strings)
             const fieldKeys = Object.keys(obj);
@@ -499,9 +610,9 @@ def build_deep_match_js(fingerprint: dict, fields: list) -> str:
                 return v && typeof v === 'string' && v.length > 0;
             }}).length;
 
-            // Require at least 40% of expected fields to be present
-            // (a sidebar or error dialog will have 0-1 out of 8 fields)
-            const minFields = Math.max(2, Math.ceil(EXPECTED_FIELDS * 0.4));
+            // For leaf elements (1-2 expected fields), require just 1 field
+            // For containers (3+ expected fields), require 30%
+            const minFields = IS_LEAF ? 1 : Math.max(2, Math.ceil(EXPECTED_FIELDS * 0.3));
             if (populatedCount < minFields) continue;
 
             // ──── Garbage filter ────

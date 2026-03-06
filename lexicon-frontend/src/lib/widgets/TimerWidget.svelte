@@ -65,27 +65,27 @@
   $: progress = totalSeconds > 0 ? (1 - remaining / totalSeconds) : 1;
 </script>
 
-<div class="timer-widget">
-  <button class="dismiss" on:click={onDismiss}>✕</button>
-  <div class="label">TIMER</div>
-  <div class="time" class:done>{formatTime(remaining)}</div>
+<div class="timer-widget lx-timer">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
+  <div class="label lx-label">TIMER</div>
+  <div class="time lx-timer-time" class:done>{formatTime(remaining)}</div>
 
   <!-- progress bar -->
-  <div class="progress-track">
-    <div class="progress-fill" style="width:{progress * 100}%"></div>
+  <div class="progress-track lx-progress-track">
+    <div class="progress-fill lx-progress-fill" style="width:{progress * 100}%"></div>
   </div>
 
-  <div class="controls">
+  <div class="controls lx-controls">
     {#if done}
-      <button class="ctrl-btn" on:click={reset}>↻ Reset</button>
+      <button class="ctrl-btn lx-btn" on:click={reset}>↻ Reset</button>
     {:else}
-      <button class="ctrl-btn" on:click={togglePause}>{running ? '⏸ Pause' : '▶ Resume'}</button>
-      <button class="ctrl-btn" on:click={reset}>↻ Reset</button>
+      <button class="ctrl-btn lx-btn" on:click={togglePause}>{running ? '⏸ Pause' : '▶ Resume'}</button>
+      <button class="ctrl-btn lx-btn" on:click={reset}>↻ Reset</button>
     {/if}
   </div>
 
   {#if done}
-    <div class="done-msg">⏰ Time's up!</div>
+    <div class="done-msg lx-timer-done">⏰ Time's up!</div>
   {/if}
 </div>
 

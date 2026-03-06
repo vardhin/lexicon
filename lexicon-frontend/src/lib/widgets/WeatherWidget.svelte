@@ -25,13 +25,13 @@
   $: temp = isNight ? '18°' : (hour >= 10 && hour < 16) ? '26°' : '22°';
 </script>
 
-<div class="weather-widget">
-  <button class="dismiss" on:click={onDismiss}>✕</button>
-  <div class="label">WEATHER</div>
-  <div class="weather-icon">{icon}</div>
-  <div class="temp">{temp}</div>
-  <div class="condition">{condition}</div>
-  <div class="note">Demo mode — connect API for real data</div>
+<div class="weather-widget lx-weather">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
+  <div class="label lx-label">WEATHER</div>
+  <div class="weather-icon lx-weather-icon">{icon}</div>
+  <div class="temp lx-weather-temp">{temp}</div>
+  <div class="condition lx-weather-condition">{condition}</div>
+  <div class="note lx-weather-note">Demo mode — connect API for real data</div>
 </div>
 
 <style>

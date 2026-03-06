@@ -27,11 +27,11 @@
   onDestroy(() => clearInterval(interval));
 </script>
 
-<div class="clock-widget">
-  <button class="dismiss" on:click={onDismiss}>✕</button>
-  <div class="label">CLOCK</div>
-  <div class="time">{time}</div>
-  <div class="sub">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</div>
+<div class="clock-widget lx-clock">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
+  <div class="label lx-label">CLOCK</div>
+  <div class="time lx-clock-time">{time}</div>
+  <div class="sub lx-clock-sub">{new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</div>
 </div>
 
 <style>

@@ -10,12 +10,12 @@
   let result = props?.result || '0';
 </script>
 
-<div class="calc-widget">
-  <button class="dismiss" on:click={onDismiss}>✕</button>
-  <div class="label">CALC</div>
-  <div class="expression">{expression}</div>
+<div class="calc-widget lx-calc">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
+  <div class="label lx-label">CALC</div>
+  <div class="expression lx-calc-expr">{expression}</div>
   <div class="equals">=</div>
-  <div class="result">{result}</div>
+  <div class="result lx-calc-result">{result}</div>
 </div>
 
 <style>

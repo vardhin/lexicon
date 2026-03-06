@@ -260,13 +260,27 @@
 
       var keyLower = key.toLowerCase();
 
-      // ── Detect field type by label name ──
-      if (keyLower === 'avatar' || keyLower === 'avatar_url' || keyLower === 'image' || keyLower === 'profile_image') {
-        // Avatar image — show as avatar circle with initials or as image
-        if (val.startsWith('http')) {
+      // ── Detect field type by label name AND value heuristics ──
+
+      // Skip fields that are just a duplicate of the name/avatar_name
+      // (WhatsApp: text == name from alt, no need to show twice)
+      if (keyLower === 'text' && headerParts.some(p => p.variant === 'h3' && p.value === val)) {
+        continue;
+      }
+
+      if (keyLower === 'avatar' || keyLower === 'avatar_url' || keyLower === 'image' || keyLower === 'profile_image'
+           || keyLower.match(/^avatar_\d+$/) || keyLower.match(/^image_\d*$/)) {
+        // Avatar image — render as actual image if URL, else as circle placeholder
+        if (val.startsWith('http') || val.startsWith('data:') || val.startsWith('blob:')) {
+          headerParts.push({ type: 'avatar', imgUrl: val, size: 'sm' });
+        } else {
           headerParts.push({ type: 'avatar', initials: '📷', color: 'rgba(100,180,255,0.2)', size: 'sm' });
         }
-      } else if (keyLower === 'user' || keyLower === 'username' || keyLower === 'name'
+      } else if (keyLower === 'avatar_name' || keyLower === 'image_name' || keyLower === 'name'
+                 || keyLower.match(/^avatar_\d+_name$/)) {
+        // Name extracted from img alt — this IS the contact/group name
+        headerParts.push({ type: 'text', value: val, variant: 'h3' });
+      } else if (keyLower === 'user' || keyLower === 'username'
                  || keyLower === 'title' || keyLower === 'heading'
                  || keyLower.match(/^title_\d+$/)) {
         // Primary identity — show as heading
@@ -274,6 +288,9 @@
       } else if (keyLower === 'time' || keyLower === 'date' || keyLower === 'timestamp' || keyLower === 'datetime') {
         // Timestamp — show as muted caption
         metaParts.push({ type: 'text', value: formatTime(val), variant: 'caption' });
+      } else if (isTimestampValue(val)) {
+        // Value looks like a timestamp even if the label doesn't say so
+        metaParts.push({ type: 'text', value: val, variant: 'caption' });
       } else if (keyLower === 'language' || keyLower === 'lang' || keyLower === 'type' || keyLower === 'status'
                  || keyLower === 'programminglanguage' || keyLower.endsWith('_language')) {
         // Category/type — show as badge
@@ -297,11 +314,10 @@
         // Descriptive/meta text — show as caption
         metaParts.push({ type: 'text', value: val, variant: 'caption' });
       } else {
-        // Generic field — show as key:value pair
-        var displayKey = key.replace(/_/g, ' ');
+        // Generic field — show as body text (last message, etc.)
         // Skip very long values or very short meaningless ones
         if (val.length > 1 && val.length < 300) {
-          bodyPairs.push({ type: 'pair', key: displayKey, value: val });
+          bodyPairs.push({ type: 'text', value: val, variant: 'body' });
         }
       }
     }
@@ -332,6 +348,25 @@
       type: 'card', variant: 'subtle', padding: 'sm',
       children: cardChildren,
     };
+  }
+
+  /**
+   * Heuristic: does this value look like a timestamp/day name?
+   * Catches "Yesterday", "Wednesday", "2:30 PM", "12/25", "Jan 15", etc.
+   */
+  function isTimestampValue(val) {
+    if (!val || val.length > 30) return false;
+    var v = val.toLowerCase().trim();
+    // Day names
+    if (/^(today|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.test(v)) return true;
+    // Time patterns: "2:30 PM", "14:30", "10:05 am"
+    if (/^\d{1,2}:\d{2}\s*(am|pm)?$/i.test(v)) return true;
+    // Date patterns: "12/25", "2026-01-15", "Jan 15"
+    if (/^\d{1,2}\/\d{1,2}(\/\d{2,4})?$/.test(v)) return true;
+    if (/^[a-z]{3,9}\s+\d{1,2}(,?\s*\d{4})?$/i.test(v)) return true;
+    // Relative: "2 hours ago", "5m ago", "3d"
+    if (/^\d+\s*(seconds?|minutes?|hours?|days?|weeks?|months?|m|h|d|w)\s*(ago)?$/i.test(v)) return true;
+    return false;
   }
 
   /**
@@ -394,7 +429,7 @@
 <!-- ═══════════════════════════════════════════════════════
      ROOT CONTAINER — only rendered at the top level
      ═══════════════════════════════════════════════════════ -->
-<div class="dv-root">
+<div class="dv-root lx-dataview">
   <button class="dismiss" on:click={onDismiss}>✕</button>
 
   <div class="dv-header">
@@ -547,14 +582,25 @@
 
   <!-- ── AVATAR ── -->
   {:else if node.type === 'avatar'}
-    <div
-      class="n-avatar"
-      class:n-avatar-sm={node.size === 'sm'}
-      class:n-avatar-lg={node.size === 'lg'}
-      style="background:{avatarBg(node.color)}; {node.style || ''}"
-    >
-      {node.initials || node.emoji || '?'}
-    </div>
+    {#if node.imgUrl}
+      <div
+        class="n-avatar"
+        class:n-avatar-sm={node.size === 'sm'}
+        class:n-avatar-lg={node.size === 'lg'}
+        style="padding: 0; overflow: hidden; {node.style || ''}"
+      >
+        <img src={node.imgUrl} alt="" style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%;" />
+      </div>
+    {:else}
+      <div
+        class="n-avatar"
+        class:n-avatar-sm={node.size === 'sm'}
+        class:n-avatar-lg={node.size === 'lg'}
+        style="background:{avatarBg(node.color)}; {node.style || ''}"
+      >
+        {node.initials || node.emoji || '?'}
+      </div>
+    {/if}
 
   <!-- ── STAT ── -->
   {:else if node.type === 'stat'}

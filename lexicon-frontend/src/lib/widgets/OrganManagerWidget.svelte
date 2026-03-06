@@ -232,7 +232,7 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="organ-mgr">
+<div class="organ-mgr lx-organ-mgr">
   <button class="dismiss" on:click={onDismiss}>&#10005;</button>
 
   <!-- Header -->

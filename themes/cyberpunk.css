@@ -1,0 +1,160 @@
+/* ═══════════════════════════════════════════════════════════
+   Lexicon Theme: Cyberpunk
+   Neon green on deep black. Terminal hacker aesthetic.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Canvas & Root ── */
+.lx-canvas {
+  background: rgba(0, 8, 4, 0.65) !important;
+}
+
+.lx-sidebar {
+  background: rgba(0, 12, 6, 0.85) !important;
+  border-right-color: rgba(0, 255, 140, 0.1) !important;
+}
+
+.lx-sidebar-logo {
+  color: #00ff8c !important;
+}
+
+/* ── Widget Frames ── */
+.lx-widget {
+  background: rgba(0, 15, 8, 0.75) !important;
+  border-color: rgba(0, 255, 140, 0.15) !important;
+  border-radius: 4px !important;
+  box-shadow: 0 0 20px rgba(0, 255, 140, 0.05), 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+}
+
+.lx-widget:hover {
+  border-color: rgba(0, 255, 140, 0.3) !important;
+  box-shadow: 0 0 30px rgba(0, 255, 140, 0.08), 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* ── Labels ── */
+.lx-label {
+  color: rgba(0, 255, 140, 0.8) !important;
+  text-shadow: 0 0 8px rgba(0, 255, 140, 0.3);
+}
+
+/* ── Dismiss buttons ── */
+.lx-dismiss {
+  color: rgba(0, 255, 140, 0.3) !important;
+}
+.lx-dismiss:hover {
+  color: rgba(255, 60, 60, 0.9) !important;
+  background: rgba(255, 60, 60, 0.1) !important;
+}
+
+/* ── Synapse Bar ── */
+.lx-bar {
+  background: rgba(0, 12, 6, 0.85) !important;
+  border-color: rgba(0, 255, 140, 0.2) !important;
+  box-shadow: 0 0 30px rgba(0, 255, 140, 0.06), 0 8px 40px rgba(0, 0, 0, 0.4) !important;
+}
+
+.lx-bar:focus-within {
+  border-color: rgba(0, 255, 140, 0.5) !important;
+  box-shadow: 0 0 40px rgba(0, 255, 140, 0.1), 0 0 0 1px rgba(0, 255, 140, 0.2) !important;
+}
+
+.lx-input {
+  color: rgba(0, 255, 140, 0.9) !important;
+  caret-color: #00ff8c !important;
+}
+
+.lx-input::placeholder {
+  color: rgba(0, 255, 140, 0.2) !important;
+}
+
+/* ── Toast ── */
+.lx-toast {
+  background: rgba(0, 15, 8, 0.9) !important;
+  border-color: rgba(0, 255, 140, 0.15) !important;
+  color: rgba(0, 255, 140, 0.7) !important;
+}
+
+/* ── Clock ── */
+.lx-clock-time {
+  background: linear-gradient(135deg, #00ff8c, #00cc70, #00ff8c) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+  filter: drop-shadow(0 0 12px rgba(0, 255, 140, 0.3));
+}
+
+.lx-clock-sub {
+  color: rgba(0, 255, 140, 0.3) !important;
+}
+
+/* ── Timer ── */
+.lx-timer-time {
+  background: linear-gradient(135deg, #00ff8c, #ff3c3c) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+.lx-progress-fill {
+  background: linear-gradient(90deg, #00ff8c, #00cc70) !important;
+}
+
+.lx-btn {
+  background: rgba(0, 255, 140, 0.06) !important;
+  border-color: rgba(0, 255, 140, 0.15) !important;
+  color: rgba(0, 255, 140, 0.7) !important;
+}
+
+.lx-btn:hover {
+  background: rgba(0, 255, 140, 0.12) !important;
+  color: rgba(0, 255, 140, 0.95) !important;
+  border-color: rgba(0, 255, 140, 0.3) !important;
+}
+
+/* ── Calculator ── */
+.lx-calc-result {
+  background: linear-gradient(135deg, #00ff8c, #00cc70) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* ── Date ── */
+.lx-date-big {
+  background: linear-gradient(135deg, #00ff8c, #00cc70, #00aa5c) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* ── Fonts — monospace everything ── */
+.lx-root {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace !important;
+}
+
+/* ── Terminal ── */
+.lx-terminal {
+  border-color: rgba(0, 255, 140, 0.1) !important;
+  background: rgba(0, 5, 2, 0.9) !important;
+}
+
+/* ── Menus ── */
+.lx-menu {
+  background: rgba(0, 12, 6, 0.95) !important;
+  border-color: rgba(0, 255, 140, 0.15) !important;
+}
+
+/* ── Scanline animation for extra cyber feel ── */
+.lx-canvas::after {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 255, 140, 0.008) 2px,
+    rgba(0, 255, 140, 0.008) 4px
+  );
+  pointer-events: none;
+  z-index: 99999;
+}

@@ -230,6 +230,35 @@
     else if (msg.type === 'ORGAN_STATUS' || msg.type === 'ORGAN_LIST') {
       // Informational — widget polls for data
     }
+
+    // ── Theme messages ──
+    else if (msg.type === 'APPLY_THEME') {
+      applyThemeCSS(msg.css || '');
+    }
+    else if (msg.type === 'THEME_LIST') {
+      // Show a feedback toast with available themes
+      var names = (msg.themes || []).map(function (t) { return t.name; });
+      var active = msg.active || 'none';
+      if (names.length === 0) {
+        showFeedback('No themes saved yet. Create one with the theme editor.');
+      } else {
+        showFeedback('Themes: ' + names.join(', ') + ' (active: ' + active + ')');
+      }
+    }
+    else if (msg.type === 'THEME_INFO') {
+      // Could be used by a future ThemeWidget
+    }
+  }
+
+  // ── Theme CSS injection ──
+  function applyThemeCSS(css) {
+    var el = document.getElementById('lexicon-theme');
+    if (!el) {
+      el = document.createElement('style');
+      el.id = 'lexicon-theme';
+      document.head.appendChild(el);
+    }
+    el.textContent = css || '';
   }
 
   function addWidget(msg) {
@@ -555,12 +584,12 @@
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="root">
+<div class="root lx-root">
 
   <!-- ── sidebar ── -->
-  <div class="sidebar">
+  <div class="sidebar lx-sidebar">
     <!-- svelte-ignore a11y-no-static-element-interactions -->
-    <div class="sidebar-logo" on:click={toggleWorkspaceMenu} title="Workspaces">✦</div>
+    <div class="sidebar-logo lx-sidebar-logo" on:click={toggleWorkspaceMenu} title="Workspaces">✦</div>
 
     {#each pageIndices as idx}
       <!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -593,7 +622,7 @@
   {#if showWorkspaceMenu}
     <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div class="ws-menu-backdrop" on:click={() => { showWorkspaceMenu = false; }}></div>
-    <div class="ws-menu">
+    <div class="ws-menu lx-menu">
       <div class="ws-menu-title">Workspaces</div>
       {#each workspaceList as wsName}
         <div class="ws-menu-item" class:active={wsName === currentWorkspace}>
@@ -630,7 +659,7 @@
 
   <!-- ── scrollable canvas ── -->
   <div
-    class="canvas"
+    class="canvas lx-canvas"
     bind:this={canvasEl}
     on:scroll={onCanvasScroll}
     on:click={(e) => {
@@ -669,7 +698,7 @@
       {#each widgets as w (w.id)}
         <!-- svelte-ignore a11y-no-static-element-interactions -->
         <div
-          class="widget-frame"
+          class="widget-frame lx-widget"
           class:dragging={dragId === w.id}
           class:resizing={resizeId === w.id}
           style="left:{w.x}px; top:{w.y}px; width:{w.w}px; height:{w.h}px;"
@@ -691,12 +720,12 @@
 
   <!-- feedback toast -->
   {#if feedback}
-    <div class="toast">{feedback}</div>
+    <div class="toast lx-toast">{feedback}</div>
   {/if}
 
   <!-- synapse bar -->
-  <div class="bar-wrap">
-    <div class="bar">
+  <div class="bar-wrap lx-bar-wrap">
+    <div class="bar lx-bar">
       <!-- session picker button (left of input) -->
       {#if sessions.length > 0}
         <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -722,7 +751,7 @@
           bind:this={inputEl}
           bind:value={query}
           on:keydown={onKey}
-          class="input"
+          class="input lx-input"
           placeholder={activeSessionId ? 'shell command… (Ctrl+` new, Ctrl+Tab switch)' : 'ask lexicon anything… (! prefix for shell)'}
           spellcheck="false"
           autocomplete="off"

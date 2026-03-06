@@ -23,14 +23,14 @@
   $: weekNum = Math.ceil(dayOfYear / 7);
 </script>
 
-<div class="date-widget">
-  <button class="dismiss" on:click={onDismiss}>✕</button>
-  <div class="label">DATE</div>
-  <div class="day-name">{now.toLocaleDateString('en-US', { weekday: 'long' })}</div>
-  <div class="date-big">{now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
-  <div class="year">{now.getFullYear()}</div>
+<div class="date-widget lx-date">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
+  <div class="label lx-label">DATE</div>
+  <div class="day-name lx-date-day">{now.toLocaleDateString('en-US', { weekday: 'long' })}</div>
+  <div class="date-big lx-date-big">{now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+  <div class="year lx-date-year">{now.getFullYear()}</div>
 
-  <div class="meta">
+  <div class="meta lx-meta">
     <span>Day {dayOfYear}</span>
     <span>·</span>
     <span>Week {weekNum}</span>
@@ -38,8 +38,8 @@
     <span>{yearProgress}% of year</span>
   </div>
 
-  <div class="progress-track">
-    <div class="progress-fill" style="width:{yearProgress}%"></div>
+  <div class="progress-track lx-progress-track">
+    <div class="progress-fill lx-progress-fill" style="width:{yearProgress}%"></div>
   </div>
 </div>
 

@@ -130,7 +130,7 @@
 </script>
 
 <!-- svelte-ignore a11y-no-static-element-interactions -->
-<div class="terminal-widget">
+<div class="terminal-widget lx-terminal">
   <div class="tw-header">
     <span class="tw-title">
       <span class="tw-icon">🐚</span>

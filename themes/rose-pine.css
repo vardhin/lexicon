@@ -1,0 +1,139 @@
+/* ═══════════════════════════════════════════════════════════
+   Lexicon Theme: Rosé Pine
+   Warm muted tones inspired by the Rosé Pine color scheme.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Canvas & Root ── */
+.lx-canvas {
+  background: rgba(25, 23, 36, 0.6) !important;
+}
+
+.lx-sidebar {
+  background: rgba(30, 28, 42, 0.8) !important;
+  border-right-color: rgba(235, 188, 186, 0.06) !important;
+}
+
+.lx-sidebar-logo {
+  color: #ebbcba !important;
+}
+
+/* ── Widget Frames ── */
+.lx-widget {
+  background: rgba(35, 33, 50, 0.7) !important;
+  border-color: rgba(235, 188, 186, 0.1) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 8px 32px rgba(20, 18, 30, 0.5), inset 0 1px 0 rgba(235, 188, 186, 0.04) !important;
+}
+
+/* ── Labels ── */
+.lx-label {
+  color: rgba(235, 188, 186, 0.8) !important;
+}
+
+/* ── Dismiss ── */
+.lx-dismiss {
+  color: rgba(235, 188, 186, 0.3) !important;
+}
+.lx-dismiss:hover {
+  color: rgba(235, 111, 146, 0.9) !important;
+  background: rgba(235, 111, 146, 0.1) !important;
+}
+
+/* ── Synapse Bar ── */
+.lx-bar {
+  background: rgba(30, 28, 42, 0.8) !important;
+  border-color: rgba(235, 188, 186, 0.12) !important;
+  box-shadow: 0 8px 40px rgba(20, 18, 30, 0.5), inset 0 1px 0 rgba(235, 188, 186, 0.04) !important;
+}
+
+.lx-bar:focus-within {
+  border-color: rgba(235, 188, 186, 0.35) !important;
+  box-shadow: 0 8px 40px rgba(20, 18, 30, 0.5), 0 0 0 1px rgba(235, 188, 186, 0.1) !important;
+}
+
+.lx-input {
+  color: rgba(224, 222, 244, 0.9) !important;
+  caret-color: #ebbcba !important;
+}
+
+.lx-input::placeholder {
+  color: rgba(144, 140, 170, 0.4) !important;
+}
+
+/* ── Toast ── */
+.lx-toast {
+  background: rgba(30, 28, 42, 0.92) !important;
+  border-color: rgba(235, 188, 186, 0.1) !important;
+  color: rgba(224, 222, 244, 0.6) !important;
+}
+
+/* ── Clock ── */
+.lx-clock-time {
+  background: linear-gradient(135deg, #ebbcba, #f6c177, #eb6f92) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+.lx-clock-sub {
+  color: rgba(144, 140, 170, 0.5) !important;
+}
+
+/* ── Timer ── */
+.lx-timer-time {
+  background: linear-gradient(135deg, #eb6f92, #ebbcba, #f6c177) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+.lx-progress-fill {
+  background: linear-gradient(90deg, #ebbcba, #f6c177) !important;
+}
+
+.lx-btn {
+  background: rgba(235, 188, 186, 0.06) !important;
+  border-color: rgba(235, 188, 186, 0.12) !important;
+  color: rgba(224, 222, 244, 0.6) !important;
+}
+
+.lx-btn:hover {
+  background: rgba(235, 188, 186, 0.12) !important;
+  color: rgba(224, 222, 244, 0.9) !important;
+}
+
+/* ── Calculator ── */
+.lx-calc-result {
+  background: linear-gradient(135deg, #c4a7e7, #9ccfd8) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* ── Date ── */
+.lx-date-big {
+  background: linear-gradient(135deg, #9ccfd8, #31748f, #56949f) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* ── Weather ── */
+.lx-weather-temp {
+  background: linear-gradient(135deg, #f6c177, #ebbcba, #eb6f92) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* ── Terminal ── */
+.lx-terminal {
+  background: rgba(25, 23, 36, 0.92) !important;
+  border-color: rgba(235, 188, 186, 0.06) !important;
+}
+
+/* ── Menu ── */
+.lx-menu {
+  background: rgba(30, 28, 42, 0.95) !important;
+  border-color: rgba(235, 188, 186, 0.1) !important;
+}

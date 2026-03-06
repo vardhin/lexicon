@@ -1,0 +1,130 @@
+/* ═══════════════════════════════════════════════════════════
+   Lexicon Theme: Ember
+   Warm dark theme — amber, orange, and deep charcoal.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Canvas & Root ── */
+.lx-canvas {
+  background: rgba(20, 14, 10, 0.6) !important;
+}
+
+.lx-sidebar {
+  background: rgba(25, 18, 12, 0.8) !important;
+  border-right-color: rgba(255, 160, 50, 0.08) !important;
+}
+
+.lx-sidebar-logo {
+  color: #ffa032 !important;
+}
+
+/* ── Widget Frames ── */
+.lx-widget {
+  background: rgba(30, 22, 15, 0.7) !important;
+  border-color: rgba(255, 160, 50, 0.1) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 8px 32px rgba(15, 10, 5, 0.5), inset 0 1px 0 rgba(255, 160, 50, 0.04) !important;
+}
+
+/* ── Labels ── */
+.lx-label {
+  color: rgba(255, 180, 80, 0.8) !important;
+}
+
+/* ── Synapse Bar ── */
+.lx-bar {
+  background: rgba(25, 18, 12, 0.85) !important;
+  border-color: rgba(255, 160, 50, 0.15) !important;
+  box-shadow: 0 8px 40px rgba(15, 10, 5, 0.5), inset 0 1px 0 rgba(255, 160, 50, 0.04) !important;
+}
+
+.lx-bar:focus-within {
+  border-color: rgba(255, 160, 50, 0.4) !important;
+  box-shadow: 0 8px 40px rgba(15, 10, 5, 0.5), 0 0 0 1px rgba(255, 160, 50, 0.15) !important;
+}
+
+.lx-input {
+  color: rgba(255, 230, 200, 0.9) !important;
+  caret-color: #ffa032 !important;
+}
+
+.lx-input::placeholder {
+  color: rgba(255, 180, 80, 0.2) !important;
+}
+
+/* ── Toast ── */
+.lx-toast {
+  background: rgba(25, 18, 12, 0.92) !important;
+  border-color: rgba(255, 160, 50, 0.12) !important;
+  color: rgba(255, 200, 140, 0.7) !important;
+}
+
+/* ── Clock ── */
+.lx-clock-time {
+  background: linear-gradient(135deg, #ffa032, #ff7020, #ffcc60) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+.lx-clock-sub {
+  color: rgba(255, 180, 80, 0.3) !important;
+}
+
+/* ── Timer ── */
+.lx-timer-time {
+  background: linear-gradient(135deg, #ff7020, #ff4040, #ffa032) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+.lx-progress-fill {
+  background: linear-gradient(90deg, #ffa032, #ff7020) !important;
+}
+
+.lx-btn {
+  background: rgba(255, 160, 50, 0.06) !important;
+  border-color: rgba(255, 160, 50, 0.12) !important;
+  color: rgba(255, 200, 140, 0.6) !important;
+}
+
+.lx-btn:hover {
+  background: rgba(255, 160, 50, 0.12) !important;
+  color: rgba(255, 220, 170, 0.9) !important;
+}
+
+/* ── Calculator ── */
+.lx-calc-result {
+  background: linear-gradient(135deg, #ffa032, #ff7020, #ffcc60) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* ── Date ── */
+.lx-date-big {
+  background: linear-gradient(135deg, #ffa032, #ff8020, #cc6010) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* ── Weather ── */
+.lx-weather-temp {
+  background: linear-gradient(135deg, #ffcc60, #ffa032, #ff7020) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+}
+
+/* ── Terminal ── */
+.lx-terminal {
+  background: rgba(18, 12, 8, 0.9) !important;
+  border-color: rgba(255, 160, 50, 0.06) !important;
+}
+
+/* ── Menu ── */
+.lx-menu {
+  background: rgba(25, 18, 12, 0.95) !important;
+  border-color: rgba(255, 160, 50, 0.1) !important;
+}

@@ -35,6 +35,7 @@ def _sanitize_for_json(obj):
     return str(obj)
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "infra", "data")
+THEMES_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "themes")
 DB_URL = f"surrealkv://{os.path.normpath(DATA_DIR)}"
 
 DEFAULT_WORKSPACE = "default"
@@ -52,6 +53,8 @@ class Memory:
         await self.db.use("lexicon", "lexicon")
         # Ensure default workspace exists
         await self._ensure_workspace(DEFAULT_WORKSPACE)
+        # Seed built-in themes from themes/ directory
+        await self._seed_builtin_themes()
         print(f"💾 Memory connected ({DB_URL})")
 
     async def close(self):
@@ -61,6 +64,43 @@ class Memory:
             print("💾 Memory closed")
 
     # ── Workspaces ────────────────────────────────────────
+
+    async def _seed_builtin_themes(self):
+        """Load .css files from the themes/ directory into the DB.
+
+        Only seeds themes that don't already exist so user edits aren't
+        overwritten on every restart.
+        """
+        themes_dir = os.path.normpath(THEMES_DIR)
+        if not os.path.isdir(themes_dir):
+            return
+        for fname in sorted(os.listdir(themes_dir)):
+            if not fname.endswith(".css"):
+                continue
+            theme_name = fname[:-4]  # strip .css
+            # Skip if already stored
+            existing = await self.get_theme(theme_name)
+            if existing:
+                continue
+            fpath = os.path.join(themes_dir, fname)
+            try:
+                with open(fpath, "r") as f:
+                    css = f.read()
+                # Extract description from first block comment if present
+                desc = ""
+                if css.strip().startswith("/*"):
+                    end = css.find("*/")
+                    if end > 0:
+                        block = css[2:end].strip()
+                        lines = [l.strip().lstrip("*").strip()
+                                 for l in block.splitlines() if l.strip().lstrip("*").strip()]
+                        # Second non-empty line is typically the description
+                        if len(lines) >= 2:
+                            desc = lines[1]
+                await self.create_theme(theme_name, css, desc)
+                print(f"  🎨 Seeded theme: {theme_name}")
+            except Exception as e:
+                print(f"  ⚠️ Failed to seed theme {theme_name}: {e}")
 
     async def _ensure_workspace(self, name):
         """Create workspace record if it doesn't exist."""
@@ -351,3 +391,71 @@ class Memory:
         if not result:
             return []
         return _sanitize_for_json(result)
+
+    # ── Themes ────────────────────────────────────────────
+
+    async def create_theme(self, name: str, css: str, description: str = ""):
+        """Create or update a theme."""
+        if not self.db:
+            return
+        # Upsert: delete existing, then create
+        await self.db.query(
+            "DELETE theme WHERE name = $name",
+            {"name": name},
+        )
+        await self.db.query(
+            "CREATE theme SET name = $name, css = $css, description = $desc, "
+            "updated_at = time::now()",
+            {"name": name, "css": css, "desc": description},
+        )
+
+    async def list_themes(self) -> list:
+        """Return all theme names with descriptions."""
+        if not self.db:
+            return []
+        result = await self.db.query(
+            "SELECT name, description, updated_at FROM theme ORDER BY name ASC"
+        )
+        if not result:
+            return []
+        return _sanitize_for_json(result)
+
+    async def get_theme(self, name: str) -> dict | None:
+        """Get a single theme by name (includes CSS)."""
+        if not self.db:
+            return None
+        result = await self.db.query(
+            "SELECT name, css, description, updated_at FROM theme WHERE name = $name",
+            {"name": name},
+        )
+        if result and len(result) > 0:
+            return _sanitize_for_json(result[0])
+        return None
+
+    async def delete_theme(self, name: str):
+        """Delete a theme by name."""
+        if not self.db:
+            return
+        await self.db.query("DELETE theme WHERE name = $name", {"name": name})
+
+    async def get_active_theme(self) -> str | None:
+        """Get the currently active theme name (global, not per-workspace)."""
+        if not self.db:
+            return None
+        result = await self.db.query(
+            "SELECT name FROM active_theme LIMIT 1"
+        )
+        if result and len(result) > 0:
+            return result[0].get("name")
+        return None
+
+    async def set_active_theme(self, name: str | None):
+        """Set the active theme. Pass None to clear (use default)."""
+        if not self.db:
+            return
+        await self.db.query("DELETE active_theme")
+        if name:
+            await self.db.query(
+                "CREATE active_theme SET name = $name",
+                {"name": name},
+            )

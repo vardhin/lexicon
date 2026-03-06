@@ -1,14 +1,19 @@
 <p align="center">
-  <img src="architecture/Mermaid Chart - Create complex, visual diagrams with text.-2026-02-24-134541.png" width="700" alt="Lexicon Architecture" />
+  <img src="architecture/Mermaid Chart - Create complex, visual diagrams with text.-2026-02-24-134541.png" width="700" alt="LSD Architecture" />
 </p>
 
-<h1 align="center">Lexicon</h1>
+<h1 align="center">LSD — Lexicon Shell Daemon</h1>
 
 <p align="center">
   A transparent, fullscreen overlay OS layer for Linux — triggered by a hotkey, driven by natural language, rendered as floating glass widgets.
 </p>
 
 <p align="center">
+  <em>"It's a shell that lives on top of your entire screen — like a heads-up display for your desktop. You press a key, a transparent layer appears, you type what you want in plain English, and it just… does it."</em>
+</p>
+
+<p align="center">
+  <a href="#what-is-lsd">What is LSD?</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#status">Status</a> •
   <a href="#getting-started">Getting Started</a> •
@@ -18,112 +23,139 @@
 
 ---
 
-## What is Lexicon?
+## What is LSD?
 
-Lexicon is a **desktop overlay intelligence layer**. You press `Super + `` ` on your desktop, a transparent fullscreen window appears with a centered input bar (the **Synapse Bar**), and you type natural language commands like `"clock"`, `"timer 5m"`, or `"weather"`. Lexicon interprets the command and renders **floating glass widgets** on the overlay in real time.
+**LSD** stands for **Lexicon Shell Daemon** — but in plain terms, it's a see-through layer that sits on top of your entire Linux desktop. Think of it like a HUD in a video game, except it's for your real computer.
 
-It's not a terminal. It's not an app launcher. It's a **programmable visual nervous system** for your desktop.
+Here's what that means in practice:
 
-The Tauri client runs persistently in the background (no taskbar icon, zero CPU when hidden) and toggles instantly via `lexicon-toggle` — a script you bind to any hotkey in any desktop environment. The toggle flows through ZeroMQ (the Spine) → FastAPI (the Brain) → WebSocket → Svelte → Rust IPC show/hide. Escape hides the overlay. Entire round-trip <5ms. Works on GNOME, KDE, Hyprland, Sway, and any X11/Wayland compositor.
+1. **You press a hotkey** (like `Super + `` `) and a transparent fullscreen window instantly appears over whatever you were doing — your browser, your code editor, everything stays visible underneath.
+2. **You type in plain English** into a bar at the bottom (the "Synapse Bar"): things like `"clock"`, `"timer 5m"`, `"what's the date"`, `"theme cyberpunk"`, or even shell commands like `ls` and `git status`.
+3. **Floating glass widgets appear** on the overlay — a clock, a timer, a sticky note, a system monitor — whatever you asked for.
+4. **Press Escape** and the whole thing vanishes. Zero CPU when hidden. Your desktop is untouched.
+
+It's not a terminal emulator. It's not an app launcher. It's a **daemon** (a background process) that gives your desktop a programmable glass nervous system you can talk to in natural language.
+
+The name is a triple meaning:
+- **L**exicon **S**hell **D**aemon — what it literally is
+- **LSD** — because it puts a trippy transparent layer over your reality
+- It's also just a daemon (`lexicond`) — it runs silently in the background, always listening
 
 ---
 
 ## Architecture
 
-Lexicon is a multi-layer system:
+LSD is a multi-layer system with body-inspired naming:
 
 | Layer | Name | Tech | Role |
 |-------|------|------|------|
-| **0** | **The Body** | Tauri + Bun + SvelteKit | Transparent fullscreen window, IPC, WebView rendering |
-| **0+** | **Organs** | Tauri child webviews + injected JS | Real web apps (WhatsApp, etc.) embedded inside widgets, DOM scanning → batched events |
-| **1** | **The Brain** | Python + FastAPI + uv | Rule-based grammar engine, WebSocket hub, extension loader |
-| **2** | **The Spine** | ZeroMQ (pyzmq) | PUSH/PULL + PUB event bus between layers |
-| **3** | **The Memory** | SurrealDB (embedded) | Persistent graph + document storage for UI state, command history, WhatsApp messages, context |
-| **4** | **External Sensors** | CLI scripts, daemons *(planned)* | System monitors, ad-hoc data pushers |
+| **0** | **The Body** | Tauri + Bun + SvelteKit | Transparent fullscreen window, Rust IPC, WebView rendering |
+| **0+** | **Organs** | Playwright ghost browser + DOM scraping | Real web apps (WhatsApp, GitHub, etc.) as headless tabs — scraped, not embedded |
+| **1** | **The Brain** | Python + FastAPI + uv | Rule-based grammar engine, WebSocket hub, extension loader, organ orchestration |
+| **1+** | **The Shell** | Python PTY microservice | Real pseudo-terminal sessions (zsh/bash), full interactive shell over WebSocket |
+| **2** | **The Spine** | ZeroMQ (pyzmq) | PUSH/PULL + PUB event bus between all layers |
+| **3** | **The Memory** | SurrealDB (embedded) | Persistent document storage — UI state, history, workspaces, scraped data, themes |
+| **4** | **External Sensors** | CLI scripts, daemons | System monitors, ad-hoc data pushers via Spine |
 
 ### Data Flow
 
 ```
-Boot                  →  dev.sh starts backend (+ Spine) + Tauri client
-                      →  Tauri window opens briefly (WebView boots, JS executes)
+Boot                  →  dev.sh starts Brain + Shell + Spine + Tauri client
+                      →  Tauri window opens briefly (WebView boots, JS connects)
                       →  Svelte connects to WebSocket (ws://127.0.0.1:8000/ws)
+                      →  Brain sends RESTORE_STATE (widgets) + active theme from Memory
                       →  Rust auto-hides the window after 2s (WebView stays alive)
-                      →  Lexicon is now idle — zero CPU, no taskbar icon
+                      →  LSD is now idle — zero CPU, no taskbar icon
 
-User presses Super+`  →  lexicon-toggle PUSHes "lexicon/toggle" to Spine (Layer 2)
-                      →  Spine dispatches to Brain (Layer 1)
+User presses Super+`  →  lexicon-toggle PUSHes "lexicon/toggle" to Spine (:5557)
+                      →  Spine dispatches to Brain handler
                       →  Brain broadcasts TOGGLE_VISIBILITY over WebSocket
                       →  Svelte calls invoke("toggle_window") → Rust IPC
                       →  Rust shows window + sets fullscreen + focuses
-                      →  Backend sends RESTORE_STATE with saved widgets from SurrealDB (Layer 3)
-                      →  Svelte re-hydrates the render list — widgets reappear instantly
+                      →  Saved widgets reappear instantly (already in memory)
 
 User presses Escape   →  Svelte calls invoke("toggle_window") → Rust hides window
-                      →  Window disappears instantly, WebView stays connected
+                      →  Window vanishes instantly, WebView stays connected
 
 User types "clock"    →  Svelte sends { type: "query", text: "clock" } via WebSocket
-                      →  FastAPI receives it (Layer 1), logs command to Memory
-                      →  GrammarEngine runs text through extensions/
-                      →  extensions/clock.py match() hits → action() returns:
-                           { type: "RENDER_WIDGET", widget_type: "clock", x: 50, y: 50, w: 320, h: 180 }
+                      →  Brain logs command to Memory, runs GrammarEngine
+                      →  extensions/clock.py match() hits → action() returns RENDER_WIDGET
                       →  Sent back over WebSocket
-                      →  +page.svelte handleMessage() looks up registry["clock"]
-                      →  Adds entry to widgets[] render list, saves state to Memory
-                      →  Svelte renders <ClockWidget> at (50, 50) with glass blur frame
+                      →  Svelte looks up registry["clock"], renders <ClockWidget>
+                      →  Widget appears at (x, y) with glass blur frame
 
-User opens WhatsApp   →  Sidebar 💬 button toggles WhatsAppWidget on the canvas
-                      →  Widget calls Brain HTTP API: POST /organs (register) + POST /organs/whatsapp/launch
-                      →  Brain's OrganManager opens a tab in the Playwright ghost browser
-                      →  Ghost browser (headed, off-screen) loads web.whatsapp.com
-                      →  Playwright provides direct DOM access: query_selector, content(), evaluate()
-                      →  Brain stores messages in SurrealDB, broadcasts WHATSAPP_BATCH over WebSocket
-                      →  WhatsAppWidget receives batch, groups by chat name, updates UI
-                      →  All organs run as tabs in one browser — no separate processes, no injected JS
+User types "!ls"      →  Svelte detects shell prefix, sends shell_spawn + shell_input
+                      →  Brain relays to Shell microservice (ws://127.0.0.1:8765)
+                      →  Shell service spawns real PTY zsh session
+                      →  Output streams back: Shell → Brain → WebSocket → xterm.js widget
+                      →  Full-screen terminal widget with colors, scrollback, resize
+
+User types            →  Svelte sends { type: "apply_theme", name: "cyberpunk" }
+  "theme cyberpunk"   →  Brain looks up CSS from Memory (SurrealDB)
+                      →  Broadcasts APPLY_THEME { css: "..." } to ALL connected clients
+                      →  Svelte injects <style id="lexicon-theme"> into <head>
+                      →  Every widget, bar, sidebar re-skins instantly via lx-* classes
+
+User types "organs"   →  OrganManagerWidget spawns on canvas
+                      →  Register any URL as an "organ" (e.g. github.com, web.whatsapp.com)
+                      →  Brain's OrganManager opens a tab in a Playwright ghost browser
+                      →  User pastes outer HTML of a page element → names it → scrapes
+                      →  Playwright deep-scrapes all matching elements with field extraction
+                      →  Structured data stored in Memory, viewable in DataViewWidget
 ```
 
 ---
 
 ## Status
 
-> **Current phase: Layer 0 + Layer 1 + Layer 2 + Organs — core loop + Spine + WhatsApp organ functional.**
+> **Current phase: All core layers functional — Body + Brain + Shell + Spine + Organs + Theming.**
 
 ### ✅ Implemented
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| **Tauri shell (Layer 0)** | ✅ Complete | Transparent, borderless, always-on-top, fullscreen. Boots visible (so WebView JS executes and WebSocket connects), then Rust auto-hides after 2s. Toggle via `lexicon-toggle` (ZeroMQ PUSH → Spine → Brain → WebSocket → Svelte `invoke("toggle_window")` → Rust IPC show/hide). Escape hides when input is empty. Fallback: `curl -X POST localhost:8000/toggle`. Builds to release binary (~16MB). |
-| **Svelte frontend (Layer 0)** | ✅ Complete | SPA mode, static adapter, frost-glass overlay, Synapse Bar with command history (↑↓), feedback toasts, connection status dot. |
-| **Paged workspace (Layer 0)** | ✅ Complete | Vertically scrolling canvas divided into pages by thin aesthetic divider lines. Sidebar with page numbers for smooth scroll navigation. Auto-expands pages as content grows. Widgets freely span across dividers. |
-| **Widget renderer (Layer 0)** | ✅ Complete | Dynamic render list driven by WebSocket. Widgets positioned absolutely at `(x, y, w, h)` from backend. Glass-blur frames, pop-in animation, per-widget dismiss. |
-| **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` strings → Svelte components. Adding a widget = 1 import + 1 line. |
-| **Widget dragging (Layer 0)** | ✅ Complete | Pointer-based drag via top handle strip. Accounts for scroll offset in paged canvas. Positions persist to SurrealDB Memory and restore on relaunch. |
-| **Widget resizing (Layer 0)** | ✅ Complete | Corner resize handle (bottom-right) on hover. Min size 160×100. Sizes persist alongside positions. |
-| **Shell mode (Layer 0+1)** | ✅ Complete | Synapse Bar doubles as a **real zsh shell** with your full Arch env. Persistent zsh session per connection — `cd`, `z`, `export` changes stick between commands. TUI programs (`btop`, `vim`, `htop`) detected and rejected with helpful message. Ctrl+C / ^C button to kill running commands. 60s timeout. Prefix `!` or `$`, or type common commands (`ls`, `git`, `cat`, etc.) directly. Output streams line-by-line between green dividers on the canvas, auto-scrolling. Every command + full output + exit code persisted to SurrealDB and restored on reconnect. |
-| **Workspaces (Layer 0+3)** | ✅ Complete | Named workspaces stored in SurrealDB. Click ✦ logo → workspace menu: create, switch, delete workspaces. Each workspace has independent widgets, shell history, and state. 🧹 clear button wipes current workspace canvas + DB. Auto-saves on switch, auto-restores on load. |
-| **WebSocket client (Layer 0)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s cap). Handles `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `RESTORE_SHELL`, `SHELL_OUTPUT`, `SHELL_DONE`, `WORKSPACE_INFO`, `TOGGLE_VISIBILITY`, `WHATSAPP_BATCH`, `WHATSAPP_MESSAGE`, `WHATSAPP_STATUS`. |
-| **FastAPI server (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. WhatsApp endpoints: `POST /whatsapp/batch`, `POST /whatsapp/message`, `POST /whatsapp/status`, `GET /whatsapp/chats`, `GET /whatsapp/messages`, `GET /whatsapp/contacts`. Persistent shell session per connection. Connection manager with broadcast, CORS enabled. Sends `WORKSPACE_INFO` + `RESTORE_STATE` + `RESTORE_SHELL` on connect. Workspace CRUD. |
-| **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline, returns action list. Fallback feedback for unknown commands. |
-| **Extension: clock** | ✅ Complete | Matches ~7 natural language patterns ("what's the time", "show clock", etc). Returns `RENDER_WIDGET` with clock type. Frontend renders live-updating `HH:MM:SS` with gradient text. |
-| **Extension: clear** | ✅ Complete | Matches "clear", "dismiss all", "close", etc. Returns `CLEAR_WIDGETS` to wipe the render list. |
-| **Extension: timer** | ✅ Complete | Countdown timer — "timer 5 min", "countdown 1h30m", "set timer 30s". Parses h/m/s durations. Widget has start/pause/reset controls and progress bar. |
-| **Extension: date** | ✅ Complete | Rich date display — "what's the date", "what day is it". Shows weekday, date, year, day-of-year, week number, and year-progress bar. |
-| **Extension: note** | ✅ Complete | Sticky notes — "note buy groceries", "remind me to call bob". Editable text with click-to-edit. |
-| **Extension: calculator** | ✅ Complete | Inline math — "calc 2+2", "= pi * 2", "math sqrt(144)". Safe eval with trig, log, constants. Shows expression → result. |
-| **Extension: sysmon** | ✅ Complete | Live system monitor — "system", "show stats". CPU/RAM/disk bars with live polling from `/system` endpoint (reads `/proc`, zero dependencies). |
-| **Extension: weather** | ✅ Complete | Weather widget (demo mode) — "weather", "forecast". Time-based display placeholder. Ready for real API integration. |
-| **Extension: help** | ✅ Complete | Dynamic help guide — "help", "commands", "?". Auto-collects help metadata from all loaded extensions. Shows icons, descriptions, example commands, and usage tips. |
-| **WhatsApp Organ (Layer 0)** | ✅ Complete | Real `web.whatsapp.com` rendered **inside a widget** on the canvas via Tauri child webview. Injected `whatsapp_monitor.js` scans the WhatsApp DOM (sidebar contacts + open chat messages), batches them (500ms flush), relays via Tauri IPC → Rust → HTTP POST to Brain. Brain stores in SurrealDB, broadcasts `WHATSAPP_BATCH` over WebSocket. Widget shows: dashboard (chat list grouped by conversation, message preview, unread counts) or live view (actual WhatsApp rendered inside the widget frame). Child webview positioned to exactly overlay the widget's DOM rect — looks embedded. Stays logged in across toggles (hide doesn't destroy the webview). Sidebar 💬 button toggles the widget. |
-| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists UI state (open widgets), command history, **full shell sessions** (cmd + output + exit code), **named workspaces**, and **WhatsApp messages + contacts**. All data is workspace-scoped. Auto-restores widgets and shell history on reconnect. Output capped at 64KB per session. No external server needed. |
-| **ZeroMQ Spine (Layer 2)** | ✅ Complete | PUSH/PULL + PUB event bus. Brain binds PULL on `:5557` and PUB on `:5556`. External scripts PUSH commands (e.g., `lexicon/toggle`). Brain dispatches to handlers which broadcast over WebSocket to the Body. Toggle goes: ZeroMQ → Brain → WebSocket → Svelte → Rust IPC (`toggle_window`). HTTP fallback at `POST /toggle`. |
-| **Dev tooling** | ✅ Complete | `dev.sh` — builds Svelte → builds Tauri release binary → starts backend (+ Spine) + Tauri client. One command to rebuild and run everything. `lexicon-toggle` for hotkey binding. |
+| **Tauri shell (Layer 0)** | ✅ Complete | Transparent, borderless, always-on-top, fullscreen. Boots visible (WebView boots + WebSocket connects), Rust auto-hides after 2s. Toggle via `lexicon-toggle` (ZeroMQ → Spine → Brain → WS → Svelte → Rust IPC). Escape hides. Builds to ~16MB release binary. |
+| **Svelte frontend (Layer 0)** | ✅ Complete | SPA with static adapter, frost-glass overlay, Synapse Bar with command history (↑↓), feedback toasts, connection status dot, `lx-*` CSS anchor classes for theming. |
+| **Paged workspace (Layer 0)** | ✅ Complete | Vertically scrolling canvas divided into pages by thin divider lines. Sidebar with page numbers for smooth scroll navigation. Auto-expands as content grows. Widgets freely span across dividers. |
+| **Widget system (Layer 0)** | ✅ Complete | Dynamic render list driven by WebSocket. Absolute positioning at `(x, y, w, h)`. Glass-blur frames, pop-in animation, per-widget dismiss. Pointer-based dragging via handle strip. Corner resize handle. All positions/sizes persist to Memory. |
+| **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` → Svelte component. 11 widgets: clock, timer, date, note, calculator, sysmon, weather, help, terminal, organmanager, dataview. |
+| **Multi-session shell (Layer 0+1)** | ✅ Complete | Full PTY shell via dedicated Shell microservice (:8765). Multiple concurrent sessions — each is a real zsh/bash PTY with colors, env persistence, interactive programs. Rendered in xterm.js TerminalWidgets on the canvas. Ctrl+C, resize, signals all work natively. Synapse Bar routes to active session or spawns new ones (Ctrl+\`, Ctrl+Tab). |
+| **Workspaces (Layer 0+3)** | ✅ Complete | Named workspaces in SurrealDB. ✦ logo → workspace menu: create, switch, delete. Each workspace has independent widgets, shell state. 🧹 clear button wipes canvas + DB. Auto-saves on switch, auto-restores on load. |
+| **WebSocket protocol (Layer 0↔1)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s). Message types: `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `SHELL_SPAWNED`, `SHELL_OUTPUT`, `SHELL_EXITED`, `SHELL_ERROR`, `WORKSPACE_INFO`, `TOGGLE_VISIBILITY`, `ORGAN_STATUS`, `ORGAN_LIST`, `APPLY_THEME`, `THEME_LIST`, `THEME_INFO`, `WHATSAPP_BATCH`, `WHATSAPP_CHATS`, `WHATSAPP_MESSAGES`. |
+| **FastAPI Brain (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. Organ CRUD: `POST/GET/DELETE /organs`, `/organs/:id/launch`, `/organs/:id/kill`, `/organs/:id/match`, `/organs/:id/scrape`, `/organs/:id/rescrape`, `/organs/:id/data`. Connection manager with broadcast. CORS enabled. Workspace CRUD + theme CRUD over WebSocket. |
+| **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline. 12 extensions loaded. Fallback feedback for unknown commands. Help entries auto-collected. |
+| **Shell microservice (Layer 1+)** | ✅ Complete | Standalone Python PTY server on `:8765`. Auto-detects user's default shell. Real PTY with `TIOCSWINSZ` resize, `SIGHUP`/`SIGINT`/`SIGTSTP` signals. Raw byte streaming. Multiple concurrent sessions. |
+| **Organ system (Layer 0+)** | ✅ Complete | **Generic organ framework** — any URL can be an organ. Single headed Playwright Chromium browser (off-screen, persistent cookies). Organs are tabs. **Deep structural scraping**: paste outer HTML → tree parser discovers fields → CSS selector extraction → structured objects per match. 3-stage pipeline: similarity → structural validation → deduplication. OrganManagerWidget for CRUD. DataViewWidget for recursive layout rendering. |
+| **WhatsApp organ** | ✅ Complete | `web.whatsapp.com` as a Playwright ghost tab. Brain scrapes DOM (sidebar contacts + messages), stores in Memory, broadcasts over WebSocket. WhatsAppWidget shows chat list, message view, organ status, launch/kill controls. Stays logged in across restarts (persistent browser data). |
+| **Theming (Layer 0+3)** | ✅ Complete | Full theme system with CSS injection. 4 built-in themes: `cyberpunk`, `midnight`, `rose-pine`, `ember`. Themes stored in SurrealDB Memory, auto-seeded from `themes/*.css` on boot. Apply via natural language (`"theme cyberpunk"`), WebSocket messages, or Spine channel (`lexicon/theme`). Active theme persists across restarts and broadcasts to all connected clients. Every UI element has `lx-*` anchor classes for granular styling. Reset to default with `"reset theme"`. |
+| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists: UI state (widgets), command history, shell sessions, named workspaces, organ registrations, scrape patterns, scraped data, themes, active theme. All widget/shell data is workspace-scoped. Auto-restores on reconnect. No external server needed. |
+| **ZeroMQ Spine (Layer 2)** | ✅ Complete | PUSH/PULL on `:5557` + PUB on `:5556`. Channels: `lexicon/toggle` (show/hide), `lexicon/theme` (apply theme by name). External scripts PUSH commands → Brain dispatches → WebSocket broadcast. HTTP fallback at `POST /toggle`. |
+| **Dev tooling** | ✅ Complete | `dev.sh` — menu-driven launcher (build / preview / dev mode). Starts Brain + Shell + Spine + Tauri. One command for everything. `lexicon-toggle` for hotkey binding. |
+
+### Extensions
+
+| Extension | Command Examples | What it does |
+|-----------|-----------------|--------------|
+| **clock** | `clock`, `time`, `what time is it` | Live-updating `HH:MM:SS` with gradient text |
+| **timer** | `timer 5m`, `countdown 1h30m`, `set timer 30s` | Countdown with progress bar, pause/reset controls |
+| **date** | `date`, `what day is it`, `today` | Weekday, date, year, day-of-year, week number, year-progress bar |
+| **note** | `note buy groceries`, `remind me to call bob` | Sticky notes with click-to-edit |
+| **calculator** | `calc 2+2`, `= pi * 2`, `math sqrt(144)` | Safe math eval with trig, log, constants |
+| **sysmon** | `system`, `stats`, `cpu` | Live CPU/RAM/disk bars polling from `/proc` |
+| **weather** | `weather`, `forecast` | Weather widget (demo mode, ready for API) |
+| **help** | `help`, `commands`, `?` | Auto-generated guide from all extensions |
+| **clear** | `clear`, `dismiss all`, `close` | Wipe all widgets from canvas |
+| **organ** | `organs`, `scrape`, `organ manager` | Opens the Organ Manager widget |
+| **view** | `view github`, `dashboard`, `show data` | Data view — renders scraped organ data |
+| **theme** | `theme cyberpunk`, `themes`, `reset theme` | Apply, list, or reset visual themes |
 
 ### 🔲 Not Yet Implemented
 
 | Component | Layer | Notes |
 |-----------|-------|-------|
-| **More Organs** | 0 | Discord, Gmail, etc. — same child-webview-inside-widget pattern as WhatsApp. |
-| **CSS Morph / UI Payload push** | 0 | Backend pushing live CSS/theme changes to the overlay. Push via `lexicon/theme` Spine channel. |
-| **CLI event scripts** | 4 | Ad-hoc scripts that push events into the Spine (e.g., `lexicon push "meeting in 5min"` via ZeroMQ PUSH to `:5557`). |
+| **More Organs** | 0+ | Discord, Gmail, etc. — same Playwright tab + scrape pattern. |
+| **CLI event tool** | 4 | `lexicon push "meeting in 5min"` from terminal via ZeroMQ PUSH to Spine. |
+| **SysMon daemon** | 4 | Push system metrics on schedule via Spine. |
 
 ---
 
@@ -148,6 +180,11 @@ cd lexicon-backend
 uv sync
 cd ..
 
+# Shell microservice
+cd lexicon-shell
+uv sync
+cd ..
+
 # Frontend — install JS deps
 cd lexicon-frontend
 bun install
@@ -163,12 +200,12 @@ cd ..
 This will:
 1. Build the Svelte static site (`bun run build`)
 2. Build the Tauri release binary (`bun run tauri build`)
-3. Start the FastAPI backend + ZeroMQ Spine on `:8000` / `:5557`
-4. Launch the Tauri client in the background (hidden)
+3. Start the Brain (FastAPI :8000) + Shell microservice (:8765) + ZeroMQ Spine (:5557/:5556)
+4. Launch the Tauri client in the background (hidden until toggled)
 
 ### Toggle the overlay
 
-Bind `lexicon-toggle` to your preferred hotkey in your desktop environment:
+Bind `lexicon-toggle` to your preferred hotkey:
 
 | DE | How to bind |
 |----|-------------|
@@ -180,16 +217,39 @@ Bind `lexicon-toggle` to your preferred hotkey in your desktop environment:
 Or toggle manually:
 
 ```bash
-# Via ZeroMQ (instant)
+# Via ZeroMQ (instant, <5ms round-trip)
 ./lexicon-toggle
 
 # Via HTTP (works from anywhere)
 curl -X POST localhost:8000/toggle
 ```
 
-Press **`Escape`** (with an empty input) to hide the overlay from within.
+Press **Escape** (with empty input) to hide the overlay.
 
-> **How it works:** `lexicon-toggle` PUSHes `"lexicon/toggle"` via ZeroMQ to the Spine (`:5557`). The Brain receives it, broadcasts `TOGGLE_VISIBILITY` over WebSocket to the Svelte frontend, which calls `invoke("toggle_window")` — a Rust IPC command that does the actual `window.show()` / `window.hide()` from the Rust side. This bypasses Wayland permission issues. The window boots visible so the WebView can load (GNOME Wayland suspends JS in hidden windows), then Rust auto-hides it after 2 seconds. The entire toggle round-trip is <5ms.
+> **How it works:** `lexicon-toggle` PUSHes `"lexicon/toggle"` via ZeroMQ to the Spine (`:5557`). The Brain receives it, broadcasts `TOGGLE_VISIBILITY` over WebSocket to the Svelte frontend, which calls `invoke("toggle_window")` — a Rust IPC command that does the actual `window.show()` / `window.hide()`. This bypasses Wayland permission issues. The entire toggle round-trip is <5ms.
+
+---
+
+## Theming
+
+LSD ships with 4 built-in themes. Type `themes` to list them, `theme <name>` to apply:
+
+| Theme | Vibe |
+|-------|------|
+| `cyberpunk` | Neon green on deep black, scanline overlay, terminal hacker aesthetic |
+| `midnight` | Deep navy blue with soft purple accents, calm and focused |
+| `rose-pine` | Warm muted tones — salmon, gold, teal from the Rosé Pine palette |
+| `ember` | Amber and orange on dark charcoal, warm and cozy |
+
+```
+theme cyberpunk     ← apply a theme
+themes              ← list all themes
+reset theme         ← revert to default
+```
+
+Themes are stored in SurrealDB and persist across restarts. The active theme auto-restores on reconnect and broadcasts to all connected clients. You can also trigger themes externally via the Spine: push `"lexicon/theme cyberpunk"` to `:5557`.
+
+Custom themes: drop a `.css` file in `themes/` — it's auto-seeded on next boot. Target `lx-*` classes (`lx-widget`, `lx-bar`, `lx-input`, `lx-sidebar`, etc.) to style any element.
 
 ---
 
@@ -220,7 +280,17 @@ def action(original_text, seconds):
         "props": {"duration_seconds": seconds},
     }
 
-EXTENSION = {"name": "timer", "match": match, "action": action}
+EXTENSION = {
+    "name": "timer",
+    "match": match,
+    "action": action,
+    "help": {
+        "title": "Timer",
+        "icon": "⏱",
+        "description": "Set a countdown timer",
+        "examples": ["timer 5m", "countdown 30s"],
+    },
+}
 ```
 
 ### 2. Create the frontend widget
@@ -232,25 +302,26 @@ EXTENSION = {"name": "timer", "match": match, "action": action}
   export let onDismiss = () => {};
   // ... timer logic
 </script>
-<!-- ... timer UI -->
+<div class="timer-widget lx-timer">
+  <!-- ... timer UI with lx-* classes for theming -->
+</div>
 ```
 
 ### 3. Register it
 
 ```javascript
 // lexicon-frontend/src/lib/widgets/index.js
-import ClockWidget from './ClockWidget.svelte';
 import TimerWidget from './TimerWidget.svelte';
 
 const registry = {
-  clock: ClockWidget,
+  // ...
   timer: TimerWidget,  // ← add here
 };
-
-export default registry;
 ```
 
-Restart the backend (it auto-reloads), rebuild the frontend (`./dev.sh`). Done.
+Restart the backend (it auto-reloads via uvicorn), rebuild the frontend (`./dev.sh`). Done.
+
+Extensions can also return custom action types (not just `RENDER_WIDGET`) — the Brain's WebSocket handler intercepts them. See `extensions/theme.py` for an example that returns `THEME_APPLY` / `THEME_RESET` / `THEME_LIST_REQUEST`.
 
 ---
 
@@ -258,37 +329,56 @@ Restart the backend (it auto-reloads), rebuild the frontend (`./dev.sh`). Done.
 
 ```
 lexicon/
-├── dev.sh                          # Build + run everything
+├── dev.sh                          # Menu-driven launcher (build / preview / dev)
 ├── lexicon-toggle                  # Toggle script — bind to your DE hotkey
-├── extensions/                     # Backend extension logic (Python)
+├── lexicon-toggle.sh               # Alternative toggle script
+│
+├── extensions/                     # Backend extensions (Python, auto-loaded)
 │   ├── calculator.py               #   Inline math evaluator
 │   ├── clear.py                    #   Clear all widgets
-│   ├── clock.py                    #   Clock widget trigger
+│   ├── clock.py                    #   Clock widget
 │   ├── date.py                     #   Date display widget
 │   ├── help.py                     #   Help guide (auto-collects from all extensions)
-│   ├── note.py                     #   Sticky note widget
+│   ├── note.py                     #   Sticky notes
+│   ├── organ.py                    #   Organ Manager widget trigger
 │   ├── sysmon.py                   #   System monitor widget
+│   ├── theme.py                    #   Theme apply / list / reset
 │   ├── timer.py                    #   Countdown timer widget
+│   ├── view.py                     #   Data view / dashboard widget
 │   └── weather.py                  #   Weather widget (demo)
+│
+├── themes/                         # Built-in themes (auto-seeded to SurrealDB)
+│   ├── cyberpunk.css               #   Neon green hacker aesthetic
+│   ├── ember.css                   #   Warm amber on charcoal
+│   ├── midnight.css                #   Deep navy with purple accents
+│   └── rose-pine.css               #   Warm muted palette
+│
 ├── lexicon-backend/                # Layer 1: The Brain
 │   ├── pyproject.toml              #   uv project config
-│   ├── run.sh                      #   Start backend standalone
+│   ├── run.sh                      #   Start Brain standalone
 │   └── src/
-│       ├── main.py                 #   FastAPI app + WebSocket + WhatsApp endpoints
-│       ├── engine.py               #   Grammar engine (loads extensions/)
+│       ├── main.py                 #   FastAPI + WebSocket + organ endpoints + theme handlers
+│       ├── engine.py               #   Grammar engine (auto-loads extensions/)
 │       ├── memory.py               #   SurrealDB embedded memory (Layer 3)
 │       ├── spine.py                #   ZeroMQ PUSH/PULL + PUB event bus (Layer 2)
-│       ├── shell.py                #   Persistent zsh session per connection
-│       └── connection_manager.py   #   WebSocket connection tracking
+│       ├── shell.py                #   Shell session manager (relays to Shell microservice)
+│       ├── organ_manager.py        #   Playwright ghost browser + organ tabs + deep scraping
+│       └── connection_manager.py   #   WebSocket connection tracking + broadcast
+│
+├── lexicon-shell/                  # Layer 1+: Shell Microservice
+│   ├── pyproject.toml              #   uv project config
+│   ├── run.sh                      #   Start Shell service standalone
+│   └── shell_server.py             #   PTY server on :8765 (real zsh/bash sessions)
+│
 ├── lexicon-frontend/               # Layer 0: The Body
-│   ├── package.json                #   Bun/Vite/SvelteKit config
+│   ├── package.json                #   Bun / Vite / SvelteKit config
 │   ├── src/
-│   │   ├── app.html                #   Shell HTML (transparent bg)
-│   │   ├── routes/+page.svelte     #   Main overlay page (render list + synapse bar)
+│   │   ├── app.html                #   Shell HTML (transparent background)
+│   │   ├── routes/+page.svelte     #   Main overlay (canvas + synapse bar + theme injection)
 │   │   └── lib/
 │   │       ├── ws.js               #   WebSocket client (auto-reconnect)
 │   │       └── widgets/
-│   │           ├── index.js        #   Widget registry
+│   │           ├── index.js            # Widget registry (11 widgets)
 │   │           ├── ClockWidget.svelte
 │   │           ├── TimerWidget.svelte
 │   │           ├── DateWidget.svelte
@@ -297,18 +387,20 @@ lexicon/
 │   │           ├── SysMonWidget.svelte
 │   │           ├── WeatherWidget.svelte
 │   │           ├── HelpWidget.svelte
-│   │           ├── TerminalWidget.svelte
-│   │           └── WhatsAppWidget.svelte   # WhatsApp dashboard + embedded live view
+│   │           ├── TerminalWidget.svelte     # xterm.js PTY terminal
+│   │           ├── OrganManagerWidget.svelte  # Organ CRUD + pattern scraper
+│   │           ├── DataViewWidget.svelte      # Recursive data layout renderer
+│   │           └── WhatsAppWidget.svelte      # WhatsApp chat dashboard
 │   └── src-tauri/
 │       ├── tauri.conf.json         #   Tauri config (transparent, borderless, always-on-top)
 │       ├── capabilities/           #   Shell + IPC permissions
-│       ├── injections/
-│       │   └── whatsapp_monitor.js #   Injected into WhatsApp child webview (DOM scanner)
 │       └── src/
 │           ├── main.rs             #   Rust entry point
-│           └── lib.rs              #   Tauri setup + toggle_window + WhatsApp organ IPC
+│           └── lib.rs              #   Tauri setup + toggle_window IPC
+│
 ├── infra/
 │   └── data/                       #   SurrealDB file store (gitignored, auto-created)
+│
 └── architecture/                   # Architecture diagram (Mermaid)
 ```
 
@@ -317,17 +409,18 @@ lexicon/
 ## Roadmap
 
 - [x] **SurrealDB Memory** — persist UI state, command history, auto-restore on launch
-- [x] **More extensions** — timer, date, weather, notes, calculator, system monitor, help
-- [x] **Widget dragging** — pointer-based repositioning with persisted positions
-- [x] **Widget resizing** — corner drag handle, min-size constraints, persisted
-- [x] **Paged workspace** — scrollable multi-page canvas with sidebar navigation and dividers
-- [x] **Shell mode** — execute zsh commands directly in the Synapse Bar, streaming output on canvas
-- [x] **ZeroMQ Spine** — PUSH/PULL + PUB event bus, `lexicon-toggle` script, `POST /toggle` HTTP fallback
-- [x] **WhatsApp Organ** — real web.whatsapp.com inside a widget, DOM scanning, batched message relay, chat grouping
-- [ ] **More Organs** — Discord, Gmail, etc. — same child-webview-inside-widget pattern
-- [ ] **SysMon daemon** — push system metrics as events via Spine
-- [ ] **CLI tool** — `lexicon push "reminder text"` from terminal via Spine
-- [ ] **Theming** — runtime CSS morph pushed via `lexicon/theme` Spine channel
+- [x] **Extensions** — clock, timer, date, weather, notes, calculator, system monitor, help, clear, organ manager, data view, theme
+- [x] **Widget dragging + resizing** — pointer-based repositioning, corner resize, persisted
+- [x] **Paged workspace** — scrollable multi-page canvas with sidebar navigation
+- [x] **Multi-session shell** — real PTY sessions via Shell microservice, xterm.js rendering, multiple terminals
+- [x] **ZeroMQ Spine** — PUSH/PULL + PUB event bus, `lexicon-toggle`, `lexicon/theme` channels
+- [x] **Named workspaces** — create, switch, delete workspaces with independent state
+- [x] **Generic organ system** — any URL as a Playwright ghost browser tab, deep structural HTML scraping, pattern matching, field extraction
+- [x] **WhatsApp organ** — persistent ghost tab, DOM scraping, chat dashboard widget
+- [x] **Theming** — 4 built-in themes, SurrealDB persistence, `lx-*` CSS anchors, Spine channel, natural language control
+- [ ] **More Organs** — Discord, Gmail, etc.
+- [ ] **CLI event tool** — `lexicon push "reminder text"` from terminal via Spine
+- [ ] **SysMon daemon** — push system metrics on schedule via Spine
 
 ---
 
