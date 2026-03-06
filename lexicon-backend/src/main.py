@@ -15,6 +15,7 @@ from src.shell import ShellManager
 from src.spine import Spine
 from src.organ_manager import OrganManager
 from src.entity_resolver import EntityResolver
+from src.automation import AutomationExecutor
 
 manager = ConnectionManager()
 engine = GrammarEngine()
@@ -22,6 +23,7 @@ memory = Memory()
 spine = Spine()
 organs = OrganManager()
 resolver = EntityResolver(memory)
+automator = AutomationExecutor(organs, memory)
 
 
 @asynccontextmanager
@@ -413,6 +415,220 @@ async def all_organs_data():
             item["organ_name"] = organ.get("name") or oid
             result.append(item)
     return {"data": result}
+
+
+# ── Automation endpoints ─────────────────────────────────────
+
+@app.post("/organs/{organ_id}/automations")
+async def create_automation(organ_id: str, request: Request):
+    """Create or update a saved automation.
+
+    Body: {
+        "name": "scrape_all_repos",
+        "description": "Scroll + paginate through all repos",
+        "steps": [
+            { "type": "scroll", "direction": "bottom" },
+            { "type": "wait", "delay": 2000 },
+            { "type": "extract", "selector": "a.repo-link", "attribute": "href" },
+            { "type": "paginate", "next_selector": ".next-page",
+              "extract": { "selector": "a.repo-link", "attribute": "href" },
+              "max_pages": 3 }
+        ]
+    }
+    """
+    data = await request.json()
+    name = data.get("name", "").strip().lower().replace(" ", "_")
+    steps = data.get("steps", [])
+    description = data.get("description", "").strip()
+    if not name or not steps:
+        return {"status": "error", "detail": "name and steps are required"}
+    await memory.save_automation(organ_id, name, steps, description)
+    return {"status": "ok", "name": name, "step_count": len(steps)}
+
+
+@app.get("/organs/{organ_id}/automations")
+async def list_automations(organ_id: str):
+    """List all saved automations for an organ."""
+    automations = await memory.list_automations(organ_id)
+    return {"automations": automations}
+
+
+@app.get("/organs/{organ_id}/automations/{name}")
+async def get_automation(organ_id: str, name: str):
+    """Get a single automation with its full step definition."""
+    auto = await memory.get_automation(organ_id, name)
+    if not auto:
+        return {"status": "error", "detail": "automation not found"}
+    return {"automation": auto}
+
+
+@app.post("/organs/{organ_id}/automations/{name}/run")
+async def run_automation(organ_id: str, name: str):
+    """Execute a saved automation against the organ's live page.
+
+    The organ must be launched (tab open) before running.
+    Returns step-by-step results and all extracted data.
+    """
+    auto = await memory.get_automation(organ_id, name)
+    if not auto:
+        return {"status": "error", "detail": "automation not found"}
+
+    async def broadcast_progress(msg):
+        await manager.broadcast(msg)
+
+    result = await automator.execute(
+        organ_id, name, auto["steps"],
+        broadcast_fn=broadcast_progress,
+    )
+
+    # Auto-resolve entities from extracted data
+    entity_stats = None
+    if result.extracted_data:
+        class_name = f"auto_{name}"
+        entity_stats = await resolver.resolve(organ_id, class_name, result.extracted_data)
+
+    resp = result.to_dict()
+    if entity_stats:
+        resp["entity_resolution"] = entity_stats
+    return resp
+
+
+@app.delete("/organs/{organ_id}/automations/{name}")
+async def delete_automation(organ_id: str, name: str):
+    """Delete a saved automation."""
+    await memory.delete_automation(organ_id, name)
+    return {"status": "ok"}
+
+
+@app.get("/automations")
+async def list_all_automations():
+    """List all automations across all organs."""
+    automations = await memory.list_all_automations()
+    return {"automations": automations}
+
+
+# ── One-shot automation actions ──────────────────────────────
+
+@app.post("/organs/{organ_id}/actions/click")
+async def action_click(organ_id: str, request: Request):
+    """Click an element in the organ's page.
+
+    Body: { "selector": "button.load-more", "wait_after": 1000 }
+    """
+    data = await request.json()
+    selector = data.get("selector", "")
+    if not selector:
+        return {"status": "error", "detail": "selector is required"}
+    sr = await automator.action_click(organ_id, selector, **{
+        k: v for k, v in data.items() if k != "selector"
+    })
+    return {"success": sr.success, "data": sr.data, "error": sr.error,
+            "duration_ms": round(sr.duration_ms, 1)}
+
+
+@app.post("/organs/{organ_id}/actions/type")
+async def action_type(organ_id: str, request: Request):
+    """Type text into an input in the organ's page.
+
+    Body: { "selector": "input.search", "text": "python", "press_enter": true }
+    """
+    data = await request.json()
+    selector = data.get("selector", "")
+    text = data.get("text", "")
+    if not selector or not text:
+        return {"status": "error", "detail": "selector and text are required"}
+    sr = await automator.action_type(organ_id, selector, text, **{
+        k: v for k, v in data.items() if k not in ("selector", "text")
+    })
+    return {"success": sr.success, "data": sr.data, "error": sr.error,
+            "duration_ms": round(sr.duration_ms, 1)}
+
+
+@app.post("/organs/{organ_id}/actions/scroll")
+async def action_scroll(organ_id: str, request: Request):
+    """Scroll the organ's page.
+
+    Body: { "direction": "down", "amount": 800, "wait_after": 1000 }
+    """
+    data = await request.json()
+    sr = await automator.action_scroll(organ_id, **data)
+    return {"success": sr.success, "data": sr.data, "error": sr.error,
+            "duration_ms": round(sr.duration_ms, 1)}
+
+
+@app.post("/organs/{organ_id}/actions/navigate")
+async def action_navigate(organ_id: str, request: Request):
+    """Navigate the organ's tab to a different URL.
+
+    Body: { "url": "https://github.com/trending" }
+    """
+    data = await request.json()
+    url = data.get("url", "")
+    if not url:
+        return {"status": "error", "detail": "url is required"}
+    sr = await automator.action_navigate(organ_id, url, **{
+        k: v for k, v in data.items() if k != "url"
+    })
+    return {"success": sr.success, "data": sr.data, "error": sr.error,
+            "duration_ms": round(sr.duration_ms, 1)}
+
+
+@app.post("/organs/{organ_id}/actions/screenshot")
+async def action_screenshot(organ_id: str, request: Request):
+    """Take a screenshot of the organ's page.
+
+    Body: { "full_page": false, "selector": null }
+    """
+    data = await request.json() if request.headers.get("content-type") else {}
+    sr = await automator.action_screenshot(organ_id, **data)
+    return {"success": sr.success, "data": sr.data, "error": sr.error,
+            "duration_ms": round(sr.duration_ms, 1)}
+
+
+@app.post("/organs/{organ_id}/actions/eval")
+async def action_eval(organ_id: str, request: Request):
+    """Evaluate JavaScript in the organ's page.
+
+    Body: { "js": "document.title" }
+    """
+    data = await request.json()
+    js = data.get("js", "")
+    if not js:
+        return {"status": "error", "detail": "js is required"}
+    sr = await automator.action_eval(organ_id, js, **{
+        k: v for k, v in data.items() if k != "js"
+    })
+    return {"success": sr.success, "data": sr.data, "error": sr.error,
+            "duration_ms": round(sr.duration_ms, 1)}
+
+
+@app.post("/organs/{organ_id}/actions/extract")
+async def action_extract(organ_id: str, request: Request):
+    """Extract data from the organ's page using a pattern or CSS selector.
+
+    Body: { "outer_html": "<div class='item'>...</div>" }
+    or:   { "selector": "a.repo-link", "attribute": "href" }
+    """
+    data = await request.json()
+    sr = await automator.action_extract(organ_id, **data)
+    return {"success": sr.success, "data": sr.data, "error": sr.error,
+            "duration_ms": round(sr.duration_ms, 1)}
+
+
+@app.post("/organs/{organ_id}/actions/paginate")
+async def action_paginate(organ_id: str, request: Request):
+    """Paginate through pages, extracting data on each.
+
+    Body: {
+        "next_selector": "a.next",
+        "extract": { "selector": "h3.title", "attribute": "textContent" },
+        "max_pages": 5
+    }
+    """
+    data = await request.json()
+    sr = await automator.action_paginate(organ_id, **data)
+    return {"success": sr.success, "data": sr.data, "error": sr.error,
+            "duration_ms": round(sr.duration_ms, 1)}
 
 
 # ── Entity Resolution endpoints ──────────────────────────────

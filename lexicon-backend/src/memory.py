@@ -392,6 +392,70 @@ class Memory:
             return []
         return _sanitize_for_json(result)
 
+    # ── Automations ───────────────────────────────────────
+
+    async def save_automation(self, organ_id: str, name: str, steps: list,
+                               description: str = ""):
+        """Save (upsert) an automation for an organ."""
+        if not self.db:
+            return
+        await self.db.query(
+            "DELETE automation WHERE organ_id = $oid AND name = $name",
+            {"oid": organ_id, "name": name},
+        )
+        await self.db.query(
+            "CREATE automation SET organ_id = $oid, name = $name, "
+            "steps = $steps, description = $desc, updated_at = time::now()",
+            {"oid": organ_id, "name": name, "steps": steps, "desc": description},
+        )
+
+    async def get_automation(self, organ_id: str, name: str) -> dict | None:
+        """Get a single automation by organ + name."""
+        if not self.db:
+            return None
+        result = await self.db.query(
+            "SELECT name, steps, description, updated_at "
+            "FROM automation WHERE organ_id = $oid AND name = $name",
+            {"oid": organ_id, "name": name},
+        )
+        if result and len(result) > 0:
+            return _sanitize_for_json(result[0])
+        return None
+
+    async def list_automations(self, organ_id: str) -> list:
+        """List all automations for an organ."""
+        if not self.db:
+            return []
+        result = await self.db.query(
+            "SELECT name, description, updated_at "
+            "FROM automation WHERE organ_id = $oid ORDER BY name ASC",
+            {"oid": organ_id},
+        )
+        if not result:
+            return []
+        return _sanitize_for_json(result)
+
+    async def delete_automation(self, organ_id: str, name: str):
+        """Delete an automation."""
+        if not self.db:
+            return
+        await self.db.query(
+            "DELETE automation WHERE organ_id = $oid AND name = $name",
+            {"oid": organ_id, "name": name},
+        )
+
+    async def list_all_automations(self) -> list:
+        """List all automations across all organs."""
+        if not self.db:
+            return []
+        result = await self.db.query(
+            "SELECT organ_id, name, description, updated_at "
+            "FROM automation ORDER BY organ_id ASC, name ASC"
+        )
+        if not result:
+            return []
+        return _sanitize_for_json(result)
+
     # ── Themes ────────────────────────────────────────────
 
     async def create_theme(self, name: str, css: str, description: str = ""):

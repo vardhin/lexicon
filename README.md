@@ -20,6 +20,7 @@
   <a href="#adding-extensions">Adding Extensions</a> •
   <a href="#widget-conventions">Widget Conventions</a> •
   <a href="#entity-resolution">Entity Resolution</a> •
+  <a href="#automations">Automations</a> •
   <a href="#roadmap">Roadmap</a>
 </p>
 
@@ -52,11 +53,11 @@ LSD is a multi-layer system with body-inspired naming:
 | Layer | Name | Tech | Role |
 |-------|------|------|------|
 | **0** | **The Body** | Tauri + Bun + SvelteKit | Transparent fullscreen window, Rust IPC, WebView rendering |
-| **0+** | **Organs** | Playwright ghost browser + DOM scraping | Real web apps (WhatsApp, GitHub, etc.) as headless tabs — scraped, not embedded |
-| **1** | **The Brain** | Python + FastAPI + uv | Rule-based grammar engine, WebSocket hub, extension loader, organ orchestration |
+| **0+** | **Organs** | Playwright ghost browser + DOM scraping + automation | Real web apps (GitHub, WhatsApp, etc.) as headless tabs — scraped and automated, not embedded |
+| **1** | **The Brain** | Python + FastAPI + uv | Rule-based grammar engine, WebSocket hub, extension loader, organ orchestration, automation executor |
 | **1+** | **The Shell** | Python PTY microservice | Real pseudo-terminal sessions (zsh/bash), full interactive shell over WebSocket |
 | **2** | **The Spine** | ZeroMQ (pyzmq) | PUSH/PULL + PUB event bus between all layers |
-| **3** | **The Memory** | SurrealDB (embedded) | Persistent document storage — UI state, history, workspaces, scraped data, themes |
+| **3** | **The Memory** | SurrealDB (embedded) | Persistent document storage — UI state, history, workspaces, scraped data, automations, themes |
 | **4** | **External Sensors** | CLI scripts, daemons | System monitors, ad-hoc data pushers via Spine |
 
 ### Data Flow
@@ -104,13 +105,20 @@ User types "organs"   →  OrganManagerWidget spawns on canvas
                       →  User pastes outer HTML of a page element → names it → scrapes
                       →  Playwright deep-scrapes all matching elements with field extraction
                       →  Structured data stored in Memory, viewable in DataViewWidget
+
+User types            →  AutomationWidget spawns on canvas
+  "automations"       →  Select an organ (must be running)
+                      →  Build step sequences: click, scroll, type, wait, navigate, extract
+                      →  Save automation → run it → watch step-by-step progress
+                      →  Extracted data auto-stored in Memory, auto-resolved to entities
+                      →  One-shot actions: click/type/scroll any element, take screenshots
 ```
 
 ---
 
 ## Status
 
-> **Current phase: All core layers functional — Body + Brain + Shell + Spine + Organs + Theming.**
+> **Current phase: All core layers functional — Body + Brain + Shell + Spine + Organs + Automations + Theming.**
 
 ### ✅ Implemented
 
@@ -120,19 +128,19 @@ User types "organs"   →  OrganManagerWidget spawns on canvas
 | **Svelte frontend (Layer 0)** | ✅ Complete | SPA with static adapter, frost-glass overlay, Synapse Bar with command history (↑↓), feedback toasts, connection status dot, `lx-*` CSS anchor classes for theming. |
 | **Paged workspace (Layer 0)** | ✅ Complete | Vertically scrolling canvas divided into pages by thin divider lines. Sidebar with page numbers for smooth scroll navigation. Auto-expands as content grows. Widgets freely span across dividers. |
 | **Widget system (Layer 0)** | ✅ Complete | Dynamic render list driven by WebSocket. Absolute positioning at `(x, y, w, h)`. Glass-blur frames, pop-in animation, per-widget dismiss. Pointer-based dragging via handle strip. Corner resize handle. All positions/sizes persist to Memory. |
-| **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` → Svelte component. 12 widgets: clock, timer, date, note, calculator, sysmon, weather, help, terminal, organmanager, dataview, person. |
+| **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` → Svelte component. 13 widgets: clock, timer, date, note, calculator, sysmon, weather, help, terminal, organmanager, dataview, person, automation. |
 | **Multi-session shell (Layer 0+1)** | ✅ Complete | Full PTY shell via dedicated Shell microservice (:8765). Multiple concurrent sessions — each is a real zsh/bash PTY with colors, env persistence, interactive programs. Rendered in xterm.js TerminalWidgets on the canvas. Ctrl+C, resize, signals all work natively. Synapse Bar routes to active session or spawns new ones (Ctrl+\`, Ctrl+Tab). |
 | **Workspaces (Layer 0+3)** | ✅ Complete | Named workspaces in SurrealDB. ✦ logo → workspace menu: create, switch, delete. Each workspace has independent widgets, shell state. 🧹 clear button wipes canvas + DB. Auto-saves on switch, auto-restores on load. |
-| **WebSocket protocol (Layer 0↔1)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s). Message types: `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `SHELL_SPAWNED`, `SHELL_OUTPUT`, `SHELL_EXITED`, `SHELL_ERROR`, `WORKSPACE_INFO`, `TOGGLE_VISIBILITY`, `ORGAN_STATUS`, `ORGAN_LIST`, `APPLY_THEME`, `THEME_LIST`, `THEME_INFO`, `WHATSAPP_BATCH`, `WHATSAPP_CHATS`, `WHATSAPP_MESSAGES`. |
-| **FastAPI Brain (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. Organ CRUD: `POST/GET/DELETE /organs`, `/organs/:id/launch`, `/organs/:id/kill`, `/organs/:id/match`, `/organs/:id/scrape`, `/organs/:id/rescrape`, `/organs/:id/data`. Entity endpoints: `GET /entities`, `GET /entities/:id`, `GET /entities/search/:q`, `POST /entities/resolve`, `DELETE /entities`, `GET /entities/stats/summary`. Connection manager with broadcast. CORS enabled. Workspace CRUD + theme CRUD over WebSocket. |
-| **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline. 13 extensions loaded. Fallback feedback for unknown commands. Help entries auto-collected. |
+| **WebSocket protocol (Layer 0↔1)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s). Message types: `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `SHELL_SPAWNED`, `SHELL_OUTPUT`, `SHELL_EXITED`, `SHELL_ERROR`, `WORKSPACE_INFO`, `TOGGLE_VISIBILITY`, `ORGAN_STATUS`, `ORGAN_LIST`, `APPLY_THEME`, `THEME_LIST`, `THEME_INFO`, `AUTOMATION_PROGRESS`. |
+| **FastAPI Brain (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. Organ CRUD: `POST/GET/DELETE /organs`, `/organs/:id/launch`, `/organs/:id/kill`, `/organs/:id/match`, `/organs/:id/scrape`, `/organs/:id/rescrape`, `/organs/:id/data`. Automation CRUD: `POST/GET/DELETE /organs/:id/automations`, `/organs/:id/automations/:name/run`. One-shot actions: `/organs/:id/actions/{click,type,scroll,navigate,screenshot,eval,extract,paginate}`. Entity endpoints: `GET /entities`, `GET /entities/:id`, `GET /entities/search/:q`, `POST /entities/resolve`, `DELETE /entities`, `GET /entities/stats/summary`. Connection manager with broadcast. CORS enabled. Workspace CRUD + theme CRUD over WebSocket. |
+| **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline. 15 extensions loaded. Fallback feedback for unknown commands. Help entries auto-collected. |
 | **Shell microservice (Layer 1+)** | ✅ Complete | Standalone Python PTY server on `:8765`. Auto-detects user's default shell. Real PTY with `TIOCSWINSZ` resize, `SIGHUP`/`SIGINT`/`SIGTSTP` signals. Raw byte streaming. Multiple concurrent sessions. |
 | **Organ system (Layer 0+)** | ✅ Complete | **Generic organ framework** — any URL can be an organ. Single headed Playwright Chromium browser (off-screen, persistent cookies). Organs are tabs. **Deep structural scraping**: paste outer HTML → tree parser discovers fields → CSS selector extraction → structured objects per match. 3-stage pipeline: similarity → structural validation → deduplication. OrganManagerWidget for CRUD. DataViewWidget for recursive layout rendering. |
-| **WhatsApp organ** | ✅ Complete | `web.whatsapp.com` as a Playwright ghost tab. Brain scrapes DOM (sidebar contacts + messages), stores in Memory, broadcasts over WebSocket. WhatsAppWidget shows chat list, message view, organ status, launch/kill controls. Stays logged in across restarts (persistent browser data). |
-| **Entity resolver (Layer 1+3)** | ✅ Complete | **Multi-strategy consensus identity resolution** — zero external dependencies. Scraped data from any organ is automatically resolved into person-entity nodes. 5 voting strategies: fingerprint (phone/email exact), name similarity (Jaro-Winkler + Soundex + Double Metaphone), username correlation (cross-platform handle matching), token overlap (IDF-weighted + substring containment), contextual (avatar URL + phone digit matching). Only applicable strategies vote — absent signals don't dilute strong matches. Entities stored in SurrealDB with full source provenance. 76 tests. |
+| **Automation engine (Layer 0+1)** | ✅ Complete | **Programmable browser automation** — goes beyond static scraping. Build named step sequences: `click`, `type`, `scroll`, `wait`, `navigate`, `extract`, `paginate`, `eval_js`, `screenshot`, `conditional`, `loop`. Saved to Memory per organ. Run automations with step-by-step progress broadcast. One-shot actions for ad-hoc interaction. Paginate across multiple pages with auto-extraction. Extracted data auto-stored and auto-resolved to entity nodes. AutomationWidget for visual workflow building + execution. |
+| **Entity resolver (Layer 1+3)** | ✅ Complete | **Multi-strategy consensus identity resolution** — zero external dependencies (except spaCy NER). Scraped data from any organ is automatically resolved into person-entity nodes. 5 voting strategies: fingerprint (phone/email exact), name similarity (Jaro-Winkler + Soundex + Double Metaphone), username correlation (cross-platform handle matching), token overlap (IDF-weighted + substring containment), contextual (avatar URL + phone digit matching). Only applicable strategies vote — absent signals don't dilute strong matches. Entities stored in SurrealDB with full source provenance. |
 | **Person widget (Layer 0)** | ✅ Complete | PersonWidget — searchable grid of all resolved people, click-to-expand detail profiles with avatar, name, aliases, handles, contact info, source provenance. Built entirely from DataView meta node primitives. Full `lx-person-*` theme anchors. Search via `"people"`, `"person Rishi"`, `"who is Mehta"`, `"contacts"`. |
 | **Theming (Layer 0+3)** | ✅ Complete | Full theme system with CSS injection. 4 built-in themes: `cyberpunk`, `midnight`, `rose-pine`, `ember`. Themes stored in SurrealDB Memory, auto-seeded from `themes/*.css` on boot. Apply via natural language (`"theme cyberpunk"`), WebSocket messages, or Spine channel (`lexicon/theme`). Active theme persists across restarts and broadcasts to all connected clients. Every UI element has `lx-*` anchor classes for granular styling. Reset to default with `"reset theme"`. |
-| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists: UI state (widgets), command history, shell sessions, named workspaces, organ registrations, scrape patterns, scraped data, themes, active theme. All widget/shell data is workspace-scoped. Auto-restores on reconnect. No external server needed. |
+| **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists: UI state (widgets), command history, shell sessions, named workspaces, organ registrations, scrape patterns, scraped data, automations, themes, active theme. All widget/shell data is workspace-scoped. Auto-restores on reconnect. No external server needed. |
 | **ZeroMQ Spine (Layer 2)** | ✅ Complete | PUSH/PULL on `:5557` + PUB on `:5556`. Channels: `lexicon/toggle` (show/hide), `lexicon/theme` (apply theme by name). External scripts PUSH commands → Brain dispatches → WebSocket broadcast. HTTP fallback at `POST /toggle`. |
 | **Dev tooling** | ✅ Complete | `dev.sh` — menu-driven launcher (build / preview / dev mode). Starts Brain + Shell + Spine + Tauri. One command for everything. `lexicon-toggle` for hotkey binding. |
 
@@ -153,11 +161,13 @@ User types "organs"   →  OrganManagerWidget spawns on canvas
 | **view** | `view github`, `dashboard`, `show data` | Data view — renders scraped organ data |
 | **theme** | `theme cyberpunk`, `themes`, `reset theme` | Apply, list, or reset visual themes |
 | **person** | `people`, `person Rishi`, `who is Mehta`, `contacts` | Person dashboard — resolved entity identity graph |
+| **automation** | `automations`, `automate`, `crawl`, `workflow` | Programmable browser automation — build, save, run crawl sequences |
 
 ### 🔲 Not Yet Implemented
 
 | Component | Layer | Notes |
 |-----------|-------|-------|
+| **Scheduled Automations** | 1 | Cron-like scheduling — run automations on a timer automatically. |
 | **More Organs** | 0+ | Discord, Gmail, etc. — same Playwright tab + scrape pattern. |
 | **CLI event tool** | 4 | `lexicon push "meeting in 5min"` from terminal via ZeroMQ PUSH to Spine. |
 | **SysMon daemon** | 4 | Push system metrics on schedule via Spine. |
@@ -382,58 +392,6 @@ Themes target these via CSS:
 .lx-dismiss:hover { color: #ff0040; }
 ```
 
-### Composing from DataView meta nodes
-
-For widgets that display structured data (like PersonWidget, DataViewWidget), **build a layout tree** from the DataView meta node primitives rather than writing raw HTML. This ensures consistent styling and automatic theme support.
-
-Available node types:
-
-| Node | Purpose | Key Props |
-|------|---------|-----------|
-| `card` | Glass container with optional title/icon | `variant` (`subtle`, `outline`, `ghost`), `padding` (`sm`, `lg`, `none`) |
-| `stack` | Vertical flex container | `gap` |
-| `row` | Horizontal flex container | `gap`, `align`, `justify`, `wrap` |
-| `grid` | CSS grid | `cols`, `gap` |
-| `text` | Text node | `value`, `variant` (`h1`, `h2`, `h3`, `body`, `caption`, `mono`, `label`) |
-| `badge` | Colored pill tag | `value`, `color` (`green`, `red`, `blue`, `purple`, `cyan`, `yellow`, `dim`) |
-| `avatar` | Circle image or initials | `imgUrl`, `initials`, `color`, `size` (`sm`, `lg`) |
-| `stat` | Big number + label (KPI) | `value`, `label`, `color` |
-| `bar` | Progress bar | `label`, `percent`, `color` |
-| `pair` | Key: value line | `key`, `value` |
-| `list` | Bullet/numbered list | `items[]`, `ordered`, `more` |
-| `divider` | Thin separator | — |
-| `spacer` | Empty vertical space | `size` |
-| `image` | Placeholder image box | `alt`, `ratio` |
-
-Every node can have a `style` prop for inline overrides and `children[]` for nesting.
-
-To render a layout tree, use DataViewWidget in node mode:
-
-```svelte
-<script>
-  import DataViewWidget from './DataViewWidget.svelte';
-
-  let layout = {
-    type: 'card', title: 'Contact', icon: '👤',
-    children: [
-      { type: 'row', gap: 8, align: 'center', children: [
-        { type: 'avatar', imgUrl: 'https://...', size: 'lg' },
-        { type: 'stack', gap: 2, children: [
-          { type: 'text', value: 'Rishi Mehta', variant: 'h1' },
-          { type: 'badge', value: 'cross-linked', color: 'purple' },
-        ]},
-      ]},
-      { type: 'divider' },
-      { type: 'pair', key: '📞 Phone', value: '+91-9876543210' },
-      { type: 'pair', key: '📧 Email', value: 'rishi@example.com' },
-    ],
-  };
-</script>
-
-<!-- Render the tree through DataViewWidget's recursive renderer -->
-<DataViewWidget props={{ __node: layout }} onDismiss={() => {}} />
-```
-
 ### Styling conventions
 
 ```css
@@ -442,7 +400,7 @@ To render a layout tree, use DataViewWidget in node mode:
   position: relative; width: 100%; height: 100%;
   display: flex; flex-direction: column;
   color: rgba(255,255,255,0.92);
-  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; /* or JetBrains Mono for monospace widgets */
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   padding: 10px 14px;
   box-sizing: border-box;
   overflow: hidden;
@@ -457,19 +415,6 @@ To render a layout tree, use DataViewWidget in node mode:
   padding: 2px 6px; border-radius: 4px;
 }
 .dismiss:hover { color: #ff5f57; background: rgba(255,95,87,0.12); }
-
-/* Standard section label */
-.label {
-  font-size: 10px; letter-spacing: 3px;
-  font-weight: 600; text-transform: uppercase;
-}
-
-/* Scrollable body */
-.body {
-  flex: 1; overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255,255,255,0.1) transparent;
-}
 ```
 
 ### Backend → Frontend contract
@@ -479,28 +424,12 @@ The backend `action()` returns a `RENDER_WIDGET` message:
 ```python
 {
     "type": "RENDER_WIDGET",
-    "widget_id": "unique-id",           # Unique ID — reuse to update in place
+    "widget_id": "unique-id",
     "widget_type": "mywidget",          # Must match registry key in index.js
-    "x": 100, "y": 100,                # Canvas position (absolute, pixels)
-    "w": 400, "h": 300,                # Widget dimensions
+    "x": 100, "y": 100,
+    "w": 400, "h": 300,
     "props": { ... },                   # Passed to the Svelte component as `props`
 }
-```
-
-The widget receives `props` and can use them to fetch data, set initial state, or configure behavior. Widgets that need live data should fetch from the Brain's REST endpoints (e.g., `GET /entities`, `GET /organs/:id/data`).
-
-### Fetching from the Brain
-
-```svelte
-<script>
-  const BRAIN = 'http://127.0.0.1:8000';
-
-  async function fetchData() {
-    const r = await fetch(BRAIN + '/my-endpoint');
-    const json = await r.json();
-    // ...
-  }
-</script>
 ```
 
 ### Checklist for new widgets
@@ -510,7 +439,6 @@ The widget receives `props` and can use them to fetch data, set initial state, o
 - [ ] Root element has widget-specific class + `lx-*` theme anchor(s)
 - [ ] Dismiss button with `lx-dismiss`
 - [ ] Registered in `src/lib/widgets/index.js`
-- [ ] Complex data layouts use DataView meta node primitives (not raw HTML)
 - [ ] All interactive elements have `lx-*` classes for theme injection
 - [ ] Widget fills container (`width: 100%; height: 100%`)
 - [ ] Scrollable content areas use `scrollbar-width: thin`
@@ -523,9 +451,9 @@ LSD includes a built-in **identity resolution engine** that automatically merges
 
 ### How it works
 
-When you scrape data from an organ, the Brain's entity resolver automatically:
+When you scrape data from an organ (manually or via automation), the Brain's entity resolver automatically:
 
-1. **Extracts identity signals** from each scraped item — names, usernames, phone numbers, emails, avatar URLs
+1. **Extracts identity signals** from each scraped item — names, usernames, phone numbers, emails, avatar URLs (using spaCy NER for classification)
 2. **Compares signals** against all existing entity nodes using 5 independent voting strategies
 3. **Merges or creates** — if the consensus score exceeds the threshold, the item is merged into an existing entity; otherwise a new entity is created
 
@@ -539,18 +467,7 @@ When you scrape data from an organ, the Brain's entity resolver automatically:
 | **Token Overlap** | 1.5 | IDF-weighted Jaccard + substring containment | `"rishimehta"` contains `{"rishi", "mehta"}` |
 | **Contextual** | 4.5 | Same avatar URL, phone digit patterns | Shared avatar → 0.85 |
 
-The **consensus engine** only averages strategies that are *applicable* — if neither side has a phone number, the fingerprint strategy is excluded rather than dragging the score to zero. This prevents absent data from diluting strong matches.
-
-### API endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/entities` | GET | List all resolved entity nodes with stats |
-| `/entities/{id}` | GET | Get a single entity with full detail |
-| `/entities/search/{query}` | GET | Search entities by name/alias |
-| `/entities/resolve` | POST | Re-resolve all entities from scratch |
-| `/entities` | DELETE | Clear all entity nodes |
-| `/entities/stats/summary` | GET | Entity count and cross-link statistics |
+The **consensus engine** only averages strategies that are *applicable* — if neither side has a phone number, the fingerprint strategy is excluded rather than dragging the score to zero.
 
 ### Natural language commands
 
@@ -559,7 +476,101 @@ people              ← show all resolved person nodes
 person Rishi        ← search for a specific person
 who is Mehta        ← search by name
 contacts            ← alias for people
-entities            ← alias for people
+```
+
+---
+
+## Automations
+
+LSD's automation engine goes beyond static scraping — it lets you **dynamically crawl** through Playwright tabs by executing programmable action sequences.
+
+### What are automations?
+
+An automation is a named sequence of **steps**. Each step is an action that runs against an organ's live Playwright page. Steps execute in order, and extracted data is automatically stored and resolved into entity nodes.
+
+### Available step types
+
+| Step | What it does | Key params |
+|------|-------------|------------|
+| **click** | Click an element | `selector`, `button`, `count`, `wait_after` |
+| **type** | Type text into an input | `selector`, `text`, `clear`, `press_enter`, `delay` |
+| **scroll** | Scroll the page or element | `direction` (down/up/bottom/top), `amount`, `selector` |
+| **wait** | Wait for a condition | `selector` + `state`, or `delay` (ms), or network idle |
+| **navigate** | Go to a URL | `url` (absolute or relative), `wait_until` |
+| **extract** | Scrape data from the page | `outer_html` (full structural) or `selector` + `attribute` |
+| **paginate** | Click through pages, extracting each | `next_selector`, `extract`, `max_pages`, `stop_if_empty` |
+| **eval_js** | Run arbitrary JavaScript | `js` (must return a value) |
+| **screenshot** | Capture the page | `full_page`, `selector`, `quality` |
+| **conditional** | Run sub-steps if selector exists | `selector`, `then`, `otherwise` |
+| **loop** | Repeat sub-steps N times | `count`, `steps`, `stop_selector`, `stop_if_no_change` |
+
+### Example: Crawl GitHub trending repos
+
+```json
+{
+  "name": "github_trending",
+  "description": "Scroll through GitHub trending and extract all repos",
+  "steps": [
+    { "type": "navigate", "url": "https://github.com/trending" },
+    { "type": "wait", "delay": 2000 },
+    { "type": "scroll", "direction": "bottom", "wait_after": 1500 },
+    { "type": "extract", "selector": "article.Box-row h2 a", "attribute": "href" }
+  ]
+}
+```
+
+### Example: Search and paginate
+
+```json
+{
+  "name": "search_python_repos",
+  "steps": [
+    { "type": "navigate", "url": "https://github.com/search?q=python&type=repositories" },
+    { "type": "wait", "selector": "[data-testid='results-list']" },
+    { "type": "paginate",
+      "next_selector": "a.next_page",
+      "extract": { "selector": "div.search-title a", "attribute": "textContent" },
+      "max_pages": 3 }
+  ]
+}
+```
+
+### Example: Infinite scroll extraction
+
+```json
+{
+  "name": "scroll_and_extract",
+  "steps": [
+    { "type": "loop", "count": 5, "stop_if_no_change": true, "steps": [
+      { "type": "scroll", "direction": "down", "amount": 1200, "wait_after": 2000 },
+      { "type": "extract", "selector": ".feed-item h3", "attribute": "textContent" }
+    ]}
+  ]
+}
+```
+
+### One-shot actions
+
+For quick ad-hoc interactions without building a full automation:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/organs/{id}/actions/click` | POST | Click an element |
+| `/organs/{id}/actions/type` | POST | Type into an input |
+| `/organs/{id}/actions/scroll` | POST | Scroll the page |
+| `/organs/{id}/actions/navigate` | POST | Navigate to a URL |
+| `/organs/{id}/actions/screenshot` | POST | Take a screenshot |
+| `/organs/{id}/actions/eval` | POST | Evaluate JavaScript |
+| `/organs/{id}/actions/extract` | POST | Extract data with a pattern |
+| `/organs/{id}/actions/paginate` | POST | Paginate + extract |
+
+### Natural language commands
+
+```
+automations         ← open the automation builder widget
+automate            ← same
+crawl               ← same
+workflow            ← same
 ```
 
 ---
@@ -573,6 +584,7 @@ lexicon/
 ├── lexicon-toggle.sh               # Alternative toggle script
 │
 ├── extensions/                     # Backend extensions (Python, auto-loaded)
+│   ├── automation.py               #   Automation manager widget trigger
 │   ├── calculator.py               #   Inline math evaluator
 │   ├── clear.py                    #   Clear all widgets
 │   ├── clock.py                    #   Clock widget
@@ -588,38 +600,40 @@ lexicon/
 │   └── weather.py                  #   Weather widget (demo)
 │
 ├── themes/                         # Built-in themes (auto-seeded to SurrealDB)
-│   ├── cyberpunk.css               #   Neon green hacker aesthetic
-│   ├── ember.css                   #   Warm amber on charcoal
-│   ├── midnight.css                #   Deep navy with purple accents
-│   └── rose-pine.css               #   Warm muted palette
+│   ├── cyberpunk.css
+│   ├── ember.css
+│   ├── midnight.css
+│   └── rose-pine.css
 │
 ├── lexicon-backend/                # Layer 1: The Brain
-│   ├── pyproject.toml              #   uv project config
-│   ├── run.sh                      #   Start Brain standalone
+│   ├── pyproject.toml
+│   ├── run.sh
 │   └── src/
-│       ├── main.py                 #   FastAPI + WebSocket + organ endpoints + theme handlers
+│       ├── main.py                 #   FastAPI + WS + organ + automation + entity endpoints
 │       ├── engine.py               #   Grammar engine (auto-loads extensions/)
-│       ├── entity_resolver.py      #   Multi-strategy consensus identity resolution engine
+│       ├── automation.py           #   Automation engine — programmable browser actions
+│       ├── entity_resolver.py      #   Multi-strategy identity resolution (spaCy NER)
 │       ├── memory.py               #   SurrealDB embedded memory (Layer 3)
-│       ├── spine.py                #   ZeroMQ PUSH/PULL + PUB event bus (Layer 2)
-│       ├── shell.py                #   Shell session manager (relays to Shell microservice)
-│       ├── organ_manager.py        #   Playwright ghost browser + organ tabs + deep scraping
+│       ├── spine.py                #   ZeroMQ event bus (Layer 2)
+│       ├── shell.py                #   Shell session manager
+│       ├── organ_manager.py        #   Playwright ghost browser + deep structural scraping
 │       └── connection_manager.py   #   WebSocket connection tracking + broadcast
 │
 ├── lexicon-shell/                  # Layer 1+: Shell Microservice
-│   ├── pyproject.toml              #   uv project config
-│   ├── run.sh                      #   Start Shell service standalone
-│   └── shell_server.py             #   PTY server on :8765 (real zsh/bash sessions)
+│   ├── pyproject.toml
+│   ├── run.sh
+│   └── shell_server.py             #   PTY server on :8765
 │
 ├── lexicon-frontend/               # Layer 0: The Body
-│   ├── package.json                #   Bun / Vite / SvelteKit config
+│   ├── package.json
 │   ├── src/
-│   │   ├── app.html                #   Shell HTML (transparent background)
-│   │   ├── routes/+page.svelte     #   Main overlay (canvas + synapse bar + theme injection)
+│   │   ├── app.html
+│   │   ├── routes/+page.svelte
 │   │   └── lib/
 │   │       ├── ws.js               #   WebSocket client (auto-reconnect)
 │   │       └── widgets/
-│   │           ├── index.js            # Widget registry (12 widgets)
+│   │           ├── index.js            # Widget registry (13 widgets)
+│   │           ├── AutomationWidget.svelte
 │   │           ├── ClockWidget.svelte
 │   │           ├── TimerWidget.svelte
 │   │           ├── DateWidget.svelte
@@ -628,20 +642,18 @@ lexicon/
 │   │           ├── SysMonWidget.svelte
 │   │           ├── WeatherWidget.svelte
 │   │           ├── HelpWidget.svelte
-│   │           ├── TerminalWidget.svelte     # xterm.js PTY terminal
-│   │           ├── OrganManagerWidget.svelte  # Organ CRUD + pattern scraper
-│   │           ├── DataViewWidget.svelte      # Recursive data layout renderer
-│   │           ├── PersonWidget.svelte        # Person/entity dashboard
-│   │           └── WhatsAppWidget.svelte      # WhatsApp chat dashboard
+│   │           ├── TerminalWidget.svelte
+│   │           ├── OrganManagerWidget.svelte
+│   │           ├── DataViewWidget.svelte
+│   │           └── PersonWidget.svelte
 │   └── src-tauri/
-│       ├── tauri.conf.json         #   Tauri config (transparent, borderless, always-on-top)
-│       ├── capabilities/           #   Shell + IPC permissions
+│       ├── tauri.conf.json
 │       └── src/
-│           ├── main.rs             #   Rust entry point
-│           └── lib.rs              #   Tauri setup + toggle_window IPC
+│           ├── main.rs
+│           └── lib.rs
 │
 ├── infra/
-│   └── data/                       #   SurrealDB file store (gitignored, auto-created)
+│   └── data/                       #   SurrealDB file store (auto-created)
 │
 └── architecture/                   # Architecture diagram (Mermaid)
 ```
@@ -651,16 +663,17 @@ lexicon/
 ## Roadmap
 
 - [x] **SurrealDB Memory** — persist UI state, command history, auto-restore on launch
-- [x] **Extensions** — clock, timer, date, weather, notes, calculator, system monitor, help, clear, organ manager, data view, theme, person
+- [x] **Extensions** — clock, timer, date, weather, notes, calculator, system monitor, help, clear, organ manager, data view, theme, person, automation
 - [x] **Widget dragging + resizing** — pointer-based repositioning, corner resize, persisted
 - [x] **Paged workspace** — scrollable multi-page canvas with sidebar navigation
 - [x] **Multi-session shell** — real PTY sessions via Shell microservice, xterm.js rendering, multiple terminals
 - [x] **ZeroMQ Spine** — PUSH/PULL + PUB event bus, `lexicon-toggle`, `lexicon/theme` channels
 - [x] **Named workspaces** — create, switch, delete workspaces with independent state
 - [x] **Generic organ system** — any URL as a Playwright ghost browser tab, deep structural HTML scraping, pattern matching, field extraction
-- [x] **WhatsApp organ** — persistent ghost tab, DOM scraping, chat dashboard widget
 - [x] **Theming** — 4 built-in themes, SurrealDB persistence, `lx-*` CSS anchors, Spine channel, natural language control
-- [x] **Entity resolver** — multi-strategy consensus identity resolution, auto-resolves scraped data into person nodes, PersonWidget dashboard
+- [x] **Entity resolver** — multi-strategy consensus identity resolution (spaCy NER), auto-resolves scraped data into person nodes, PersonWidget dashboard
+- [x] **Automation engine** — programmable browser automation: click, scroll, type, wait, navigate, extract, paginate, eval, conditional, loop. Saved workflows per organ. One-shot actions. Auto-entity-resolution on extracted data
+- [ ] **Scheduled automations** — cron-like scheduling for automations to run on a timer
 - [ ] **More Organs** — Discord, Gmail, etc.
 - [ ] **CLI event tool** — `lexicon push "reminder text"` from terminal via Spine
 - [ ] **SysMon daemon** — push system metrics on schedule via Spine
