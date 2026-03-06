@@ -469,15 +469,18 @@ class Memory:
         await self.db.query(
             "CREATE entity SET "
             "entity_id = $eid, canonical_name = $cname, "
-            "aliases = $aliases, usernames = $usernames, "
+            "aliases = $aliases, alias_freq = $afreq, "
+            "usernames = $usernames, "
             "phones = $phones, emails = $emails, avatars = $avatars, "
             "sources = $sources, name_tokens = $tokens, "
             "phonetic_keys = $pkeys, "
+            "observation_count = $obs_count, confidence = $confidence, "
             "created_at = time::now(), updated_at = time::now()",
             {
                 "eid": entity["entity_id"],
                 "cname": entity.get("canonical_name", "Unknown"),
                 "aliases": entity.get("aliases", []),
+                "afreq": entity.get("alias_freq", {}),
                 "usernames": entity.get("usernames", []),
                 "phones": entity.get("phones", []),
                 "emails": entity.get("emails", []),
@@ -485,6 +488,8 @@ class Memory:
                 "sources": entity.get("sources", []),
                 "tokens": entity.get("name_tokens", []),
                 "pkeys": entity.get("phonetic_keys", []),
+                "obs_count": entity.get("observation_count", 1),
+                "confidence": entity.get("confidence", 0.0),
             },
         )
 
@@ -546,7 +551,7 @@ class Memory:
         # If we need to recompute canonical name, first get current aliases
         if new_names:
             current = await self.db.query(
-                "SELECT aliases, usernames FROM entity WHERE entity_id = $eid",
+                "SELECT aliases, usernames, alias_freq FROM entity WHERE entity_id = $eid",
                 {"eid": entity_id},
             )
             if current and len(current) > 0:
@@ -557,7 +562,14 @@ class Memory:
                 all_names = all_aliases + list(set(
                     current[0].get("usernames", []) + (new_usernames or [])
                 ))
-                params["new_canonical"] = choose_canonical_name(all_names)
+                alias_freq = current[0].get("alias_freq", {})
+                if isinstance(alias_freq, dict):
+                    # Increment freq for new names
+                    for n in new_names:
+                        alias_freq[n] = alias_freq.get(n, 0) + 1
+                params["new_canonical"] = choose_canonical_name(
+                    all_names, alias_freq
+                )
             else:
                 params["new_canonical"] = new_names[0] if new_names else "Unknown"
 
@@ -568,8 +580,9 @@ class Memory:
         if not self.db:
             return []
         result = await self.db.query(
-            "SELECT entity_id, canonical_name, aliases, usernames, "
-            "phones, emails, avatars, sources, name_tokens, phonetic_keys, "
+            "SELECT entity_id, canonical_name, aliases, alias_freq, "
+            "usernames, phones, emails, avatars, sources, name_tokens, "
+            "phonetic_keys, observation_count, confidence, "
             "created_at, updated_at "
             "FROM entity ORDER BY updated_at DESC LIMIT $limit",
             {"limit": limit},
@@ -621,11 +634,14 @@ class Memory:
         )
 
     async def clear_entities(self):
-        """Delete all entity nodes (for full re-resolution)."""
+        """Delete all entity nodes, graph edges, and word nodes."""
         if not self.db:
             return
         await self.db.query("DELETE entity")
         await self.db.query("DELETE entity_buffer")
+        await self.db.query("DELETE word")
+        await self.db.query("DELETE mentions")
+        await self.db.query("DELETE entity_link")
 
     # ── Entity Buffer (weak signals awaiting correlation) ──
 
@@ -693,3 +709,144 @@ class Memory:
             "total_entities": total,
             "multi_source_entities": multi_count,
         }
+
+    # ── Frequency Tracking & Confidence ───────────────────
+
+    async def increment_observation_count(self, entity_id: str, delta: int = 1):
+        """Increment the observation count for an entity."""
+        if not self.db:
+            return
+        await self.db.query(
+            "UPDATE entity SET observation_count = observation_count + $delta, "
+            "updated_at = time::now() WHERE entity_id = $eid",
+            {"eid": entity_id, "delta": delta},
+        )
+
+    async def merge_alias_frequencies(self, entity_id: str,
+                                       freq_delta: dict[str, int]):
+        """Merge alias frequency deltas into the entity's alias_freq map.
+
+        freq_delta is { alias_name: count_to_add }.
+        SurrealDB stores alias_freq as an object — we read, merge, write.
+        """
+        if not self.db or not freq_delta:
+            return
+        current = await self.db.query(
+            "SELECT alias_freq FROM entity WHERE entity_id = $eid",
+            {"eid": entity_id},
+        )
+        existing_freq = {}
+        if current and len(current) > 0:
+            existing_freq = current[0].get("alias_freq", {}) or {}
+            if not isinstance(existing_freq, dict):
+                existing_freq = {}
+
+        for alias, count in freq_delta.items():
+            existing_freq[alias] = existing_freq.get(alias, 0) + count
+
+        await self.db.query(
+            "UPDATE entity SET alias_freq = $freq, updated_at = time::now() "
+            "WHERE entity_id = $eid",
+            {"eid": entity_id, "freq": existing_freq},
+        )
+
+    async def update_entity_confidence(self, entity_id: str, confidence: float):
+        """Update the confidence score for an entity."""
+        if not self.db:
+            return
+        await self.db.query(
+            "UPDATE entity SET confidence = $conf, updated_at = time::now() "
+            "WHERE entity_id = $eid",
+            {"eid": entity_id, "conf": confidence},
+        )
+
+    async def update_entity_canonical(self, entity_id: str, canonical_name: str):
+        """Update the canonical name for an entity."""
+        if not self.db:
+            return
+        await self.db.query(
+            "UPDATE entity SET canonical_name = $cname, updated_at = time::now() "
+            "WHERE entity_id = $eid",
+            {"eid": entity_id, "cname": canonical_name},
+        )
+
+    # ── Graph Edges (SurrealDB RELATE) ────────────────────
+
+    async def ensure_word_node(self, word: str, ref_count: int = 1):
+        """Create or update a shared word node (for deduplication).
+
+        Instead of every entity storing copies of common tokens,
+        we create a single `word` record and RELATE entities to it.
+        """
+        if not self.db:
+            return
+        existing = await self.db.query(
+            "SELECT * FROM word WHERE value = $w",
+            {"w": word},
+        )
+        if existing and len(existing) > 0:
+            await self.db.query(
+                "UPDATE word SET ref_count = $rc, updated_at = time::now() "
+                "WHERE value = $w",
+                {"w": word, "rc": ref_count},
+            )
+        else:
+            await self.db.query(
+                "CREATE word SET value = $w, ref_count = $rc, "
+                "created_at = time::now(), updated_at = time::now()",
+                {"w": word, "rc": ref_count},
+            )
+
+    async def relate_entity_to_word(self, entity_id: str, word: str):
+        """Create a graph edge: entity -[mentions]-> word.
+
+        Uses SurrealDB RELATE for proper graph structure.
+        Skips if the relation already exists.
+        """
+        if not self.db:
+            return
+        # Check if relation already exists via the flat fields
+        existing = await self.db.query(
+            "SELECT * FROM mentions WHERE "
+            "entity_ref = $eid AND word_ref = $w",
+            {"eid": entity_id, "w": word},
+        )
+        if existing and len(existing) > 0:
+            return
+        # Resolve record IDs first
+        ent_rows = await self.db.query(
+            "SELECT id FROM entity WHERE entity_id = $eid LIMIT 1",
+            {"eid": entity_id},
+        )
+        word_rows = await self.db.query(
+            "SELECT id FROM word WHERE value = $w LIMIT 1",
+            {"w": word},
+        )
+        if not ent_rows or not word_rows:
+            return
+        ent_rid = ent_rows[0].get("id")
+        word_rid = word_rows[0].get("id")
+        if not ent_rid or not word_rid:
+            return
+        # Create the relation via RELATE using resolved record IDs
+        await self.db.query(
+            f"RELATE {ent_rid}->mentions->{word_rid} "
+            "SET entity_ref = $eid, word_ref = $w, "
+            "created_at = time::now()",
+            {"eid": entity_id, "w": word},
+        )
+
+    async def create_entity_link(self, entity_id_a: str, entity_id_b: str,
+                                  link_type: str = 'linked'):
+        """Create a graph edge between two entities.
+
+        link_type can be: 'merged', 'linked', 'same_person', etc.
+        """
+        if not self.db:
+            return
+        await self.db.query(
+            "CREATE entity_link SET "
+            "from_entity = $a, to_entity = $b, "
+            "link_type = $lt, created_at = time::now()",
+            {"a": entity_id_a, "b": entity_id_b, "lt": link_type},
+        )

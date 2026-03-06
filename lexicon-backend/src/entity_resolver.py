@@ -11,9 +11,8 @@ Architecture (multi-strategy consensus):
   └──────────────┬──────────────────────────────────────────┘
                  │
        ┌─────────▼──────────┐
-       │  SIGNAL EXTRACTION  │  Pull name, username, avatar,
-       │                     │  phone, email, URL from each
-       │                     │  scraped item (source-agnostic)
+       │  SIGNAL EXTRACTION  │  spaCy NER + field-name heuristics
+       │  (NLP-first)        │  classify PERSON, DATE, TIME, etc.
        └─────────┬──────────┘
                  │
        ┌─────────▼──────────────────────────────────────────┐
@@ -44,27 +43,41 @@ Architecture (multi-strategy consensus):
        │                     │  if consensus > threshold.
        └─────────┬──────────┘
                  │
-       ┌─────────▼──────────┐
-       │  ENTITY NODE STORE  │  SurrealDB: `entity` table
-       │                     │  with aliases, sources, and
-       │                     │  all raw data references.
-       └────────────────────┘
+       ┌─────────▼──────────────────────────────────────────┐
+       │  ENTITY NODE STORE  │  SurrealDB (graph DB):       │
+       │  (graph-native)     │  entity nodes + RELATE edges │
+       │                     │  + shared token/word nodes    │
+       │                     │  + frequency tracking         │
+       └────────────────────────────────────────────────────┘
 
 Entity Node Schema (in SurrealDB):
   entity {
-    entity_id:       string (uuid)
-    canonical_name:  string ("Rishi Mehta")
-    aliases:         [string] — all name variants seen
-    usernames:       [string] — handles across platforms
-    phones:          [string]
-    emails:          [string]
-    avatars:         [string] — avatar URLs
-    sources:         [{ organ_id, class_name, item_index, raw }]
-    name_tokens:     [string] — lowercased name tokens for search
-    phonetic_keys:   [string] — Soundex/Metaphone codes
-    created_at:      datetime
-    updated_at:      datetime
+    entity_id:         string (uuid)
+    canonical_name:    string ("Rishi Mehta")
+    aliases:           [string] — all name variants seen
+    alias_freq:        { alias → count } — observation frequency per alias
+    usernames:         [string] — handles across platforms
+    phones:            [string]
+    emails:            [string]
+    avatars:           [string] — avatar URLs
+    sources:           [{ organ_id, class_name, item_index, raw }]
+    name_tokens:       [string] — lowercased name tokens for search
+    phonetic_keys:     [string] — Soundex/Metaphone codes
+    observation_count: int — total times this entity was observed
+    confidence:        float — [0.0, 1.0] grows with evidence
+    created_at:        datetime
+    updated_at:        datetime
   }
+
+Graph Edges (SurrealDB RELATE):
+  entity -[mentions]-> word    (shared word node, deduplicated)
+  entity -[observed_as]-> alias_node  (name variant with count)
+  entity -[linked_to]-> entity (cross-source identity links)
+
+NER:
+  Uses spaCy (en_core_web_sm) for entity classification instead of
+  hardcoded regex/word-lists. The model handles PERSON, DATE, TIME,
+  GPE, ORG, CARDINAL, ORDINAL, etc. natively.
 """
 
 from __future__ import annotations
@@ -74,6 +87,61 @@ import uuid
 import math
 from dataclasses import dataclass, field
 from typing import Optional
+
+import spacy
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  spaCy NLP MODEL (loaded once, shared across all calls)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+try:
+    _nlp = spacy.load("en_core_web_sm", disable=["parser", "lemmatizer"])
+except OSError:
+    # Fallback: if model not installed, NER features degrade gracefully
+    _nlp = None
+    print("⚠️  spaCy model 'en_core_web_sm' not found. "
+          "NER will fall back to heuristics. "
+          "Install with: uv pip install en-core-web-sm@https://github.com/"
+          "explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/"
+          "en_core_web_sm-3.8.0-py3-none-any.whl")
+
+
+def _ner_classify(text: str) -> list[tuple[str, str]]:
+    """Run spaCy NER on text. Returns [(entity_text, label), ...].
+
+    Labels include: PERSON, DATE, TIME, GPE (geo-political entity),
+    ORG (organization), CARDINAL, ORDINAL, MONEY, PERCENT, etc.
+    """
+    if _nlp is None:
+        return []
+    doc = _nlp(text)
+    return [(ent.text, ent.label_) for ent in doc.ents]
+
+
+def _ner_is_person(text: str) -> bool:
+    """Check if spaCy considers this text a PERSON entity."""
+    entities = _ner_classify(text)
+    for ent_text, label in entities:
+        if label == "PERSON":
+            return True
+    return False
+
+
+def _ner_label(text: str) -> str | None:
+    """Get the dominant NER label for a text string.
+
+    Returns the label if spaCy recognizes it as a single entity,
+    None if ambiguous or unrecognized.
+    """
+    entities = _ner_classify(text)
+    if not entities:
+        return None
+    # If the whole text (or most of it) is one entity, return that label
+    for ent_text, label in entities:
+        # The entity covers most of the input text
+        if len(ent_text) / max(len(text.strip()), 1) > 0.6:
+            return label
+    return entities[0][1] if len(entities) == 1 else None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -255,13 +323,14 @@ def jaro_winkler(s1: str, s2: str, p: float = 0.1) -> float:
 #  TOKEN SET SIMILARITY (Jaccard + IDF-weighted)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Tokens to exclude from name token sets — these are common English words,
-# time words, and UI labels that should never be treated as name tokens.
+# Minimal noise tokens — only the most obvious functional words.
+# spaCy handles the real classification; this is just for token-set math.
 _NOISE_TOKENS = frozenset({
     'the', 'and', 'for', 'with', 'from', 'this', 'that', 'not', 'are',
     'was', 'were', 'been', 'has', 'have', 'had', 'will', 'can', 'may',
     'but', 'its', 'your', 'you', 'our', 'all', 'any', 'few',
-    'ago', 'just', 'now', 'new', 'old', 'last', 'next', 'more', 'less',
+    'ago', 'just', 'now',
+    # Time/date words that should never be name tokens
     'today', 'yesterday', 'tomorrow', 'tonight', 'morning', 'evening',
     'afternoon', 'night', 'week', 'month', 'year', 'day', 'days',
     'hours', 'hour', 'minutes', 'minute', 'seconds', 'second',
@@ -269,9 +338,10 @@ _NOISE_TOKENS = frozenset({
     'monday', 'tuesday', 'wednesday', 'thursday', 'friday',
     'saturday', 'sunday',
     'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct',
-    'nov', 'dec', 'january', 'february', 'march', 'april', 'may',
+    'nov', 'dec', 'january', 'february', 'march', 'april',
     'june', 'july', 'august', 'september', 'october', 'november',
     'december',
+    # UI / messaging noise
     'online', 'offline', 'typing', 'seen', 'read', 'sent', 'pending',
     'message', 'messages', 'chat', 'call', 'photo', 'video', 'audio',
     'file', 'image', 'link', 'media', 'group', 'channel',
@@ -453,27 +523,11 @@ _URL_PROFILE_RE = re.compile(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  NOISE FILTERING — reject non-person values from names
+#  NOISE FILTERING — NLP-first with regex fallbacks
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ── Time patterns ──
-_TIME_RE = re.compile(
-    r'^'
-    r'(?:\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?)'  # 9:00, 9:00 PM, 15:00:00
-    r'|(?:\d{1,2}\s*[AaPp][Mm])'                         # 9AM, 9 PM
-    r'$'
-)
-
-# ── Date patterns ──
-_DATE_RE = re.compile(
-    r'^(?:'
-    r'\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}'       # 01/02/2025, 1-2-25
-    r'|\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}'         # 2025-01-02
-    r'|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:\s+\d{2,4})?'
-    r'|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}(?:,?\s+\d{2,4})?'
-    r')$',
-    re.IGNORECASE
-)
+# ── Pure-digit or pure-punctuation ──
+_PURE_DIGITS_RE = re.compile(r'^[\d\s.,;:!?\-+*/=<>()[\]{}#@$%^&|~`"\'\\]+$')
 
 # ── ISO / Unix timestamps ──
 _TIMESTAMP_RE = re.compile(
@@ -483,39 +537,18 @@ _TIMESTAMP_RE = re.compile(
     r')$'
 )
 
-# ── Relative time / duration words ──
-_RELATIVE_TIME_WORDS = frozenset({
-    # Relative days
-    'yesterday', 'today', 'tomorrow', 'now', 'just now', 'recently',
-    'earlier', 'later', 'tonight', 'this morning', 'this evening',
-    'this afternoon', 'last night',
-    # Relative periods
-    'last week', 'this week', 'next week',
-    'last month', 'this month', 'next month',
-    'last year', 'this year', 'next year',
-    # Days of the week
-    'monday', 'tuesday', 'wednesday', 'thursday', 'friday',
-    'saturday', 'sunday',
-    'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
-    # Months (standalone, not as part of someone's name)
-    'january', 'february', 'march', 'april', 'may', 'june',
-    'july', 'august', 'september', 'october', 'november', 'december',
-    'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct',
-    'nov', 'dec',
-})
-
-# ── Relative time phrases (e.g., "2 hours ago", "5 min ago", "in 3 days") ──
-_RELATIVE_TIME_RE = re.compile(
-    r'^(?:'
-    r'(?:\d+\s*(?:sec(?:ond)?|min(?:ute)?|hr|hour|day|week|month|year)s?\s*ago)'
-    r'|(?:in\s+\d+\s*(?:sec(?:ond)?|min(?:ute)?|hr|hour|day|week|month|year)s?)'
-    r'|(?:a\s+(?:few\s+)?(?:sec(?:ond)?|min(?:ute)?|hr|hour|day|week|month|year)s?\s*ago)'
-    r'|(?:\d+\s*(?:s|m|h|d|w)\s*ago)'  # Compact: "5m ago", "2h ago"
-    r')$',
-    re.IGNORECASE
+# ── Time patterns (structural — spaCy sometimes misses bare times) ──
+_TIME_RE = re.compile(
+    r'^'
+    r'(?:\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp][Mm])?)'  # 9:00, 9:00 PM, 15:00:00
+    r'|(?:\d{1,2}\s*[AaPp][Mm])'                         # 9AM, 9 PM
+    r'$'
 )
 
-# ── Generic UI labels, status words, non-person nouns ──
+# ── Noise words — UI/status labels + short time/day words spaCy misses ──
+# spaCy is the primary NER classifier, but single short words like "now",
+# "Wed", "message" aren't reliably tagged by the model. These serve as
+# a safety net for `is_noise()`.
 _NOISE_WORDS = frozenset({
     # Status / state words
     'online', 'offline', 'away', 'busy', 'idle', 'active', 'inactive',
@@ -538,15 +571,28 @@ _NOISE_WORDS = frozenset({
     'story', 'stories', 'status', 'post', 'posts', 'comment',
     'comments', 'reply', 'replies', 'forward', 'forwarded',
     'attachment', 'media', 'download', 'upload',
-    # Numerical / measurement words that appear in scraped data
     'am', 'pm',
+    # Short time/day/month words that spaCy often misses as standalone
+    'now', 'ago', 'recently', 'earlier', 'later', 'just now',
+    'yesterday', 'today', 'tomorrow', 'tonight',
+    'this morning', 'this evening', 'this afternoon', 'last night',
+    'last week', 'this week', 'next week',
+    'last month', 'this month', 'next month',
+    'last year', 'this year', 'next year',
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday',
+    'saturday', 'sunday',
+    'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+    'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct',
+    'nov', 'dec',
     # WhatsApp-specific noise
     'you', 'me', 'this message was deleted', 'waiting for this message',
     'missed voice call', 'missed video call', 'end-to-end encrypted',
     'messages and calls are end-to-end encrypted',
     'tap for more info', 'click here', 'learn more',
     'default', 'general', 'main',
-    # Social media UI labels / actions
+    # Social media UI labels
     'following', 'follower', 'followers', 'follow', 'unfollow',
     'like', 'likes', 'liked', 'unlike', 'share', 'shared', 'shares',
     'retweet', 'retweeted', 'repost', 'reposted', 'save', 'saved',
@@ -561,34 +607,16 @@ _NOISE_WORDS = frozenset({
     'last seen within a month', 'last seen a long time ago',
 })
 
-# ── Pure-digit or pure-punctuation ──
-_PURE_DIGITS_RE = re.compile(r'^[\d\s.,;:!?\-+*/=<>()[\]{}#@$%^&|~`"\'\\]+$')
-
-# ── Strings that are mostly digits/punctuation with minimal alpha ──
-_LOW_ALPHA_THRESHOLD = 0.3  # Less than 30% alphabetic → likely not a name
+# ── Low alphabetic ratio threshold ──
+_LOW_ALPHA_THRESHOLD = 0.3
 
 
 def is_noise(value: str) -> bool:
     """Returns True if the value is NOT a plausible person name.
 
-    Filters out:
-      - Times: "9:00 PM", "15:00", "9AM"
-      - Dates: "01/02/2025", "Jan 15", "2025-01-02"
-      - Timestamps: "2025-01-02T15:00:00", "1704067200"
-      - Relative time: "yesterday", "2 hours ago", "last week", "5m ago"
-      - Day/month names: "Monday", "January", "Wed"
-      - UI labels: "online", "typing...", "unknown", "n/a"
-      - Status words: "read", "delivered", "seen"
-      - Generic nouns: "message", "photo", "video", "file"
-      - Pure digits/punctuation: "12345", "---", "***"
-      - Very short strings (single char)
-      - Very long strings (sentences, paragraphs — not names)
-      - Strings with too many words (> 5 — likely a sentence, not a name)
-        NOTE: the stricter 3-word limit is in looks_like_person_name,
-        so content-classified fields use the tight limit while
-        explicitly named fields (e.g. name: "Nehal Varma CSE IOT")
-        only get the loose > 5 check.
-      - Strings with very low alphabetic ratio (mostly digits/symbols)
+    Uses spaCy NER as the primary classifier, with structural regex
+    fallbacks for patterns the model might miss (bare timestamps,
+    pure digits, UI labels).
     """
     if not value:
         return True
@@ -603,86 +631,62 @@ def is_noise(value: str) -> bool:
     if len(text) > 80:
         return True
 
-    # Too many words — sentences, not names.
-    # Note: the stricter 3-word limit for name detection is in
-    # looks_like_person_name(). This looser check catches obvious
-    # sentences while allowing 4-word values through when the field
-    # name explicitly says "name".
+    # Too many words — sentences, not names
     words = text.split()
     if len(words) > 5:
         return True
 
     text_lower = text.lower().strip()
 
-    # Exact match against known noise words
+    # Exact match against UI noise words (spaCy won't catch these)
     if text_lower in _NOISE_WORDS:
         return True
 
-    # Relative time words (exact phrase match)
-    if text_lower in _RELATIVE_TIME_WORDS:
-        return True
-
-    # Time patterns: "9:00", "9:00 PM", "15:00:00", "9 AM"
-    if _TIME_RE.match(text):
-        return True
-
-    # Date patterns: "01/02/2025", "Jan 15, 2025", "15 January"
-    if _DATE_RE.match(text):
-        return True
-
-    # ISO timestamps and Unix timestamps
-    if _TIMESTAMP_RE.match(text):
-        return True
-
-    # Relative time phrases: "2 hours ago", "5m ago", "in 3 days"
-    if _RELATIVE_TIME_RE.match(text_lower):
-        return True
-
-    # Pure digits / punctuation / symbols — no alphabetic chars at all
+    # Pure digits / punctuation / symbols
     if _PURE_DIGITS_RE.match(text):
         return True
 
-    # Low alphabetic ratio — e.g., "12:34:56", "2025/01/02", "###"
+    # ISO/Unix timestamps
+    if _TIMESTAMP_RE.match(text):
+        return True
+
+    # Bare time patterns: "9:14 pm", "15:00"
+    if _TIME_RE.match(text):
+        return True
+
+    # Low alphabetic ratio
     alpha_count = sum(c.isalpha() for c in text)
     if alpha_count == 0:
         return True
     if len(text) >= 3 and (alpha_count / len(text)) < _LOW_ALPHA_THRESHOLD:
         return True
 
-    # Single word that is entirely lowercase and all-ASCII — likely a
-    # generic word or label, not a person's name. Exception: usernames
-    # are handled separately and bypass this check.
-    # (We keep this lenient — "rishi" is fine, but "yesterday" is caught above)
+    # ── spaCy NER classification ──
+    # If spaCy recognizes this as DATE, TIME, CARDINAL, ORDINAL, MONEY,
+    # PERCENT, QUANTITY — it's not a person name.
+    ner_label = _ner_label(text)
+    if ner_label in ('DATE', 'TIME', 'CARDINAL', 'ORDINAL',
+                     'MONEY', 'PERCENT', 'QUANTITY'):
+        return True
 
     return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  VALUE CLASSIFIER — content-first classification for unknown fields
+#  VALUE CLASSIFIER — NLP-first classification for all fields
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#
-# When scraped data has generic field names (e.g., "text", "text_1",
-# "span", "div_0") we can't rely on the field name to determine what
-# the value is. Instead, we classify the *value itself* by pattern:
-#
-#   "Rishi Mehta M block Complex"  → 'name'
-#   "9:14 pm"                      → 'noise'
-#   "+91 98765 43210"              → 'phone'
-#   "user@example.com"             → 'email'
-#   "https://github.com/rishi"     → 'url'
-#   "Yesterday"                    → 'noise'
-#
 
-# Heuristic: a person name is 1-5 words, mostly alphabetic, and at
-# least one word starts with an uppercase letter (or is all-lowercase
-# which is common in South Asian / informal naming).
+# Character pattern for plausible person names (letters, hyphens, apostrophes, dots)
 _PERSON_NAME_RE = re.compile(
     r'^[A-Za-zÀ-ÖØ-öø-ÿ\u0900-\u097F\u0980-\u09FF\u0C00-\u0C7F'
     r'\u0C80-\u0CFF\u0D00-\u0D7F\u4E00-\u9FFF\u3040-\u30FF'
     r'\'\-\.\s]+$'
 )
 
-# Common English words that survive the noise filter but aren't person names
+# Common English words that survive noise + NER filters but aren't person names.
+# spaCy doesn't tag these as entities, and they're not in _NOISE_WORDS because
+# they're not UI/status/messaging terms. This is the safety net for
+# content-based classification when field names are generic.
 _COMMON_NON_NAMES = frozenset({
     'red', 'blue', 'green', 'yellow', 'orange', 'purple', 'pink',
     'black', 'white', 'brown', 'gray', 'grey', 'gold', 'silver',
@@ -693,7 +697,7 @@ _COMMON_NON_NAMES = frozenset({
     'first', 'last', 'next', 'prev', 'previous', 'other', 'more',
     'less', 'all', 'any', 'some', 'each', 'every', 'both', 'same',
     'different', 'special', 'normal', 'regular', 'standard', 'custom',
-    'male', 'female', 'other', 'unspecified',
+    'male', 'female', 'unspecified',
     'english', 'hindi', 'tamil', 'french', 'spanish', 'german',
     'important', 'urgent', 'critical', 'info', 'warning', 'danger',
 })
@@ -702,100 +706,97 @@ _COMMON_NON_NAMES = frozenset({
 def looks_like_person_name(value: str) -> bool:
     """Positive classifier: does this value look like a person name?
 
-    Uses multiple heuristics to decide if a string is plausibly a
-    person's name rather than a message, timestamp, label, or other
-    scraped artifact.
+    Uses spaCy NER as the primary signal, with structural heuristics
+    as fallback for short names the model might not recognize.
 
     Criteria:
       1. Not noise (timestamps, dates, status words, etc.)
-      2. 2-60 chars
-      3. 1-3 words
-      4. Predominantly alphabetic (> 60% alpha)
-      5. Matches the name character pattern (letters, hyphens, apostrophes, dots)
-      6. At least one word has ≥ 2 alphabetic characters
+      2. 2-60 chars, 1-3 words
+      3. spaCy labels it PERSON → yes
+      4. Fallback: predominantly alphabetic, matches name char pattern,
+         has capitalization signal
     """
     if not value:
         return False
 
     text = value.strip()
-
-    # Length bounds — names are 2-60 chars
     if len(text) < 2 or len(text) > 60:
         return False
 
-    text_lower = text.lower().strip()
-
-    # Must not be noise (time, date, status, etc.)
     if is_noise(text):
         return False
 
-    # Word count — names have 1-3 words
     words = text.split()
     if len(words) > 3:
         return False
 
-    # Must be predominantly alphabetic (> 60%)
+    # ── Primary: spaCy NER ──
+    ner_label = _ner_label(text)
+    if ner_label == 'PERSON':
+        return True
+
+    # If spaCy says it's something else (ORG, GPE, etc.), trust it ONLY
+    # if the structural heuristics also don't support it being a name.
+    # spaCy often misclassifies South Asian names or name+abbreviation
+    # combos (e.g., "Shanmuganadhan EEE" → ORG, "Priya Singh" → GPE).
+    # So we note the NER opinion but fall through to structural checks.
+    spacy_says_not_person = ner_label in (
+        'ORG', 'GPE', 'LOC', 'FAC', 'PRODUCT', 'EVENT',
+        'WORK_OF_ART', 'LAW', 'LANGUAGE', 'NORP'
+    )
+
+    # ── Fallback: structural heuristics for short names spaCy misses ──
     alpha_count = sum(c.isalpha() for c in text)
     if alpha_count == 0:
         return False
     if (alpha_count / len(text)) < 0.6:
         return False
 
-    # Must match the name character pattern — letters, spaces,
-    # hyphens, apostrophes, dots. No digits, colons, slashes, etc.
     if not _PERSON_NAME_RE.match(text):
         return False
 
     # At least one word must have ≥ 2 alphabetic chars
-    # (filters out single-initial fragments like "M" or "A")
-    has_real_word = False
-    for w in words:
-        alpha_in_word = sum(c.isalpha() for c in w)
-        if alpha_in_word >= 2:
-            has_real_word = True
-            break
+    has_real_word = any(sum(c.isalpha() for c in w) >= 2 for w in words)
     if not has_real_word:
         return False
 
-    # ── Capitalization signal ──
-    # For single-word values, require at least one uppercase letter.
-    # Names like "Rishi", "VARDHIN", "Nehal" have caps. Single lowercase
-    # words like "red", "large", "default" are too ambiguous without
-    # field-name context. Multi-word values get a pass because
-    # "upendra kv" is a valid informal name.
-    if len(words) == 1:
-        if text.islower():
-            # Single all-lowercase word — too ambiguous to classify as name
-            # without field-name context. Could be "red", "large", "offline".
-            return False
+    # Single-word: require capitalization (spaCy didn't confirm it)
+    if len(words) == 1 and text.islower():
+        return False
 
-    # ── Common English words that aren't names ──
+    # Common English words that aren't names
+    text_lower = text.lower().strip()
     if text_lower in _COMMON_NON_NAMES:
+        return False
+
+    # If spaCy labeled this as ORG/GPE/etc but structural heuristics
+    # passed (multi-word, capitalized, name-pattern match) — we still
+    # accept it. South Asian names are commonly misclassified by the
+    # English model. Only reject single-word values that spaCy rejects.
+    if spacy_says_not_person and len(words) == 1:
         return False
 
     return True
 
 
 # ── Image/avatar URL detection ──
-# Matches URLs that are clearly images — either by file extension or
-# by CDN path patterns used by WhatsApp, Telegram, social media, etc.
 _IMAGE_EXT_RE = re.compile(
     r'\.(?:jpg|jpeg|png|gif|webp|svg|bmp|ico|avif|tiff)(?:\?|#|$)',
     re.IGNORECASE
 )
 _IMAGE_CDN_RE = re.compile(
     r'(?:'
-    r'pps\.whatsapp\.net'                   # WhatsApp profile pics
-    r'|web\.whatsapp\.com/pp'               # WhatsApp web avatars
-    r'|instagram.*?/(?:t51|s\d+x\d+)'      # Instagram CDN
-    r'|(?:avatars|avatar)\d*\.githubusercontent' # GitHub avatars
-    r'|(?:pbs|abs)\.twimg\.com'             # Twitter/X media
-    r'|cdn\.(?:discordapp|discord)\.com/avatars'  # Discord avatars
-    r'|(?:graph\.facebook|scontent)'        # Facebook/Meta CDN
-    r'|t\.me/i/userpic'                     # Telegram
-    r'|(?:lh\d+\.googleusercontent)'        # Google profile pics
-    r'|(?:media|images?)\.(?:licdn|linkedin)\.com'  # LinkedIn
-    r'|gravatar\.com/avatar'               # Gravatar
+    r'pps\.whatsapp\.net'
+    r'|web\.whatsapp\.com/pp'
+    r'|instagram.*?/(?:t51|s\d+x\d+)'
+    r'|(?:avatars|avatar)\d*\.githubusercontent'
+    r'|(?:pbs|abs)\.twimg\.com'
+    r'|cdn\.(?:discordapp|discord)\.com/avatars'
+    r'|(?:graph\.facebook|scontent)'
+    r'|t\.me/i/userpic'
+    r'|(?:lh\d+\.googleusercontent)'
+    r'|(?:media|images?)\.(?:licdn|linkedin)\.com'
+    r'|gravatar\.com/avatar'
     r')',
     re.IGNORECASE
 )
@@ -1069,12 +1070,17 @@ def extract_signals(item: dict | str, organ_id: str = '',
                 # It was classified noise, but it's all-alpha — maybe a name
                 v_lower = v.lower().strip()
                 if (v_lower not in _NOISE_WORDS
-                        and v_lower not in _RELATIVE_TIME_WORDS
+                        and v_lower not in _COMMON_NON_NAMES
                         and not _TIME_RE.match(v)
-                        and not _DATE_RE.match(v)
-                        and not _RELATIVE_TIME_RE.match(v_lower)
-                        and v_lower not in _COMMON_NON_NAMES):
-                    ambiguous.append(i)
+                        and not _TIMESTAMP_RE.match(v)):
+                    # Ask spaCy — if it says DATE/TIME/CARDINAL, skip
+                    ner_lbl = _ner_label(v)
+                    if ner_lbl not in ('DATE', 'TIME', 'CARDINAL', 'ORDINAL',
+                                       'MONEY', 'PERCENT', 'QUANTITY',
+                                       'ORG', 'GPE', 'LOC', 'FAC',
+                                       'PRODUCT', 'EVENT', 'LANGUAGE',
+                                       'NORP'):
+                        ambiguous.append(i)
 
         # Context promotion: if we have noise values (timestamps, days)
         # alongside ambiguous alpha-only values, the ambiguous ones are
@@ -1471,30 +1477,52 @@ def compute_idf(entities: list[dict]) -> dict[str, float]:
 #  CANONICAL NAME SELECTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def choose_canonical_name(aliases: list[str]) -> str:
+def choose_canonical_name(aliases: list[str],
+                         alias_freq: dict[str, int] | None = None) -> str:
     """Pick the best canonical display name from a list of aliases.
 
+    Considers observation frequency — a name seen 100 times should
+    beat one seen once. This enables dynamic evolution as data grows.
+
     Heuristics:
-      1. Prefer properly capitalized names (Title Case)
-      2. Prefer names with spaces (multi-word = full name)
-      3. Prefer longer names (more complete)
-      4. Avoid usernames / handles (no digits, no @)
-      5. Penalize noise values (dates, times, labels)
+      1. Frequency bonus (higher observation count → more likely the real name)
+      2. Prefer properly capitalized names (Title Case)
+      3. Prefer names with spaces (multi-word = full name)
+      4. Prefer longer names (more complete)
+      5. Avoid usernames / handles (no digits, no @)
+      6. Penalize noise values (dates, times, labels)
+      7. spaCy PERSON label → bonus
     """
     if not aliases:
         return 'Unknown'
 
+    if alias_freq is None:
+        alias_freq = {}
+
     # Filter out noise values before scoring
     clean = [a for a in aliases if not is_noise(a)]
     if not clean:
-        # All aliases are noise — return the first raw alias rather than "Unknown"
         return aliases[0] if aliases else 'Unknown'
     if len(clean) == 1:
         return clean[0]
 
+    # Max frequency for normalization
+    max_freq = max((alias_freq.get(a, 1) for a in clean), default=1)
+
     scored = []
     for name in clean:
         s = 0.0
+        freq = alias_freq.get(name, 1)
+
+        # ── Frequency bonus (logarithmic, up to +25) ──
+        # A name seen 100x vs 1x gets a massive boost
+        if max_freq > 1:
+            s += (math.log(freq + 1) / math.log(max_freq + 1)) * 25.0
+
+        # ── spaCy PERSON label bonus ──
+        if _ner_is_person(name):
+            s += 15.0
+
         # Multi-word bonus
         parts = name.split()
         if len(parts) >= 2:
@@ -1535,6 +1563,13 @@ def choose_canonical_name(aliases: list[str]) -> str:
 
 class EntityResolver:
     """Resolves raw scraped data into person-based entity nodes.
+
+    Features:
+      - Frequency tracking: observation counts per alias grow over time
+      - Confidence evolution: entity confidence increases with evidence
+      - Dynamic canonical name: re-elected as frequency data changes
+      - Graph deduplication: shared word/token nodes via SurrealDB RELATE
+      - Periodic re-evaluation: re-scores entities as data accumulates
 
     Usage:
         resolver = EntityResolver(memory)
@@ -1626,6 +1661,9 @@ class EntityResolver:
         #    previously buffered items may now match
         promoted = await self._sweep_buffer(existing_entities, idf)
         stats['promoted'] += promoted
+
+        # 8. Deduplicate word tokens into shared graph nodes
+        await self._deduplicate_tokens(existing_entities)
 
         return stats
 
@@ -1748,7 +1786,7 @@ class EntityResolver:
     async def resolve_all_sources(self) -> dict:
         """Re-resolve ALL scraped data across ALL organs.
         Useful for rebuilding the entity graph from scratch."""
-        # Clear existing entities
+        # Clear existing entities and graph edges
         await self.memory.clear_entities()
 
         # Get all organs
@@ -1777,13 +1815,208 @@ class EntityResolver:
 
         return total_stats
 
+    # ── Re-evaluation: dynamic confidence as data accumulates ──
+
+    async def re_evaluate_entities(self) -> dict:
+        """Re-evaluate ALL entities based on accumulated evidence.
+
+        This is the key method for dynamic evolution. As new data pours
+        in, entities that were created with low confidence should be
+        re-scored. Entities with high observation counts become more
+        confident. Entities that were wrongly split may get merged.
+
+        Call this periodically (e.g., after every N scrapes) or on demand.
+
+        Returns: { re_scored, merged_pairs, canonical_updates }
+        """
+        stats = {'re_scored': 0, 'merged_pairs': 0,
+                 'canonical_updates': 0}
+
+        entities = await self.memory.list_entities()
+        if not entities:
+            return stats
+
+        idf = compute_idf(entities)
+
+        # 1. Re-score confidence for each entity based on evidence
+        for ent in entities:
+            old_confidence = ent.get('confidence', 0.0)
+            new_confidence = self._compute_confidence(ent)
+            if abs(new_confidence - old_confidence) > 0.01:
+                await self.memory.update_entity_confidence(
+                    ent['entity_id'], new_confidence
+                )
+                stats['re_scored'] += 1
+
+            # Re-elect canonical name with frequency data
+            alias_freq = ent.get('alias_freq', {})
+            aliases = ent.get('aliases', [])
+            usernames = ent.get('usernames', [])
+            all_names = aliases + usernames
+            old_canonical = ent.get('canonical_name', '')
+            new_canonical = choose_canonical_name(all_names, alias_freq)
+            if new_canonical != old_canonical:
+                await self.memory.update_entity_canonical(
+                    ent['entity_id'], new_canonical
+                )
+                stats['canonical_updates'] += 1
+
+        # 2. Check for entity pairs that should be merged
+        #    (may have been created separately but now have enough
+        #    overlapping evidence)
+        merged_ids = set()
+        for i, ent_a in enumerate(entities):
+            if ent_a['entity_id'] in merged_ids:
+                continue
+            for j in range(i + 1, len(entities)):
+                ent_b = entities[j]
+                if ent_b['entity_id'] in merged_ids:
+                    continue
+
+                # Build signals from ent_b and test against ent_a
+                sig_b = IdentitySignals(
+                    names=ent_b.get('aliases', []),
+                    usernames=ent_b.get('usernames', []),
+                    phones=ent_b.get('phones', []),
+                    emails=ent_b.get('emails', []),
+                    avatars=ent_b.get('avatars', []),
+                )
+                result = compute_consensus(sig_b, ent_a, idf)
+                if result.should_merge and result.consensus_score >= 0.7:
+                    # Merge ent_b into ent_a
+                    await self._merge_entities(
+                        ent_a['entity_id'], ent_b['entity_id']
+                    )
+                    merged_ids.add(ent_b['entity_id'])
+                    stats['merged_pairs'] += 1
+
+        return stats
+
+    def _compute_confidence(self, entity: dict) -> float:
+        """Compute entity confidence based on accumulated evidence.
+
+        Factors:
+          - observation_count: more observations → higher confidence
+          - signal diversity: phone + email + name > just name
+          - alias consistency: many aliases for same name → higher
+          - source diversity: seen across multiple organs → higher
+        """
+        obs_count = entity.get('observation_count', 1)
+        aliases = entity.get('aliases', [])
+        phones = entity.get('phones', [])
+        emails = entity.get('emails', [])
+        usernames = entity.get('usernames', [])
+        avatars = entity.get('avatars', [])
+        sources = entity.get('sources', [])
+
+        confidence = 0.0
+
+        # Observation frequency (logarithmic, caps at ~0.4)
+        confidence += min(0.4, math.log(obs_count + 1) / 10.0)
+
+        # Signal diversity (each signal type adds confidence)
+        signal_types = sum([
+            bool(aliases),
+            bool(phones),
+            bool(emails),
+            bool(usernames),
+            bool(avatars),
+        ])
+        confidence += signal_types * 0.1  # up to 0.5
+
+        # Source diversity (seen from multiple organs)
+        unique_organs = len(set(
+            s.get('organ_id', '') for s in sources if isinstance(s, dict)
+        ))
+        if unique_organs >= 2:
+            confidence += 0.1
+
+        # spaCy validation: if canonical name is recognized as PERSON
+        canonical = entity.get('canonical_name', '')
+        if canonical and _ner_is_person(canonical):
+            confidence += 0.05
+
+        return min(1.0, confidence)
+
+    async def _merge_entities(self, keep_id: str, absorb_id: str):
+        """Merge two entity nodes: absorb one into the other.
+
+        The absorbed entity is deleted; all its data merges into the keeper.
+        """
+        absorbed = await self.memory.get_entity(absorb_id)
+        if not absorbed:
+            return
+
+        # Build signals from the absorbed entity
+        signals = IdentitySignals(
+            names=absorbed.get('aliases', []),
+            usernames=absorbed.get('usernames', []),
+            phones=absorbed.get('phones', []),
+            emails=absorbed.get('emails', []),
+            avatars=absorbed.get('avatars', []),
+        )
+
+        # Merge all sources
+        for source in absorbed.get('sources', []):
+            await self._merge_into_entity(
+                keep_id, signals,
+                source.get('organ_id', ''),
+                source.get('class_name', ''),
+                source.get('item_index', 0),
+            )
+
+        # Merge alias frequencies
+        absorbed_freq = absorbed.get('alias_freq', {})
+        if absorbed_freq:
+            await self.memory.merge_alias_frequencies(keep_id, absorbed_freq)
+
+        # Transfer observation count
+        absorbed_obs = absorbed.get('observation_count', 1)
+        await self.memory.increment_observation_count(keep_id, absorbed_obs)
+
+        # Create a graph edge recording the merge (for audit trail)
+        await self.memory.create_entity_link(keep_id, absorb_id, 'merged')
+
+        # Delete the absorbed entity
+        await self.memory.delete_entity(absorb_id)
+
+    # ── Graph deduplication: shared word nodes ──
+
+    async def _deduplicate_tokens(self, entities: list[dict]):
+        """Create shared word nodes in the graph and link entities to them.
+
+        Instead of every entity storing its own copy of common tokens
+        like "hi", "hello", "the", we create a single `word` node and
+        RELATE entities to it. This is what a graph DB is for.
+        """
+        # Collect all tokens across all entities with their frequencies
+        token_entity_map: dict[str, list[str]] = {}
+        for ent in entities:
+            eid = ent.get('entity_id', '')
+            for token in ent.get('name_tokens', []):
+                token_entity_map.setdefault(token, []).append(eid)
+
+        # Only create shared nodes for tokens that appear in 2+ entities
+        # (deduplication only matters when there's actual duplication)
+        for token, entity_ids in token_entity_map.items():
+            if len(entity_ids) >= 2:
+                await self.memory.ensure_word_node(token, len(entity_ids))
+                for eid in set(entity_ids):
+                    await self.memory.relate_entity_to_word(eid, token)
+
     def _build_entity_dict(self, entity_id: str, signals: IdentitySignals,
                            organ_id: str, class_name: str,
                            item_idx: int) -> dict:
         """Build a dict representation of a new entity (for in-memory list)."""
         aliases = list(signals.names)
         all_names = aliases + list(signals.usernames)
-        canonical = choose_canonical_name(all_names) if all_names else 'Unknown'
+
+        # Initialize alias frequency map
+        alias_freq: dict[str, int] = {}
+        for a in aliases:
+            alias_freq[a] = alias_freq.get(a, 0) + 1
+
+        canonical = choose_canonical_name(all_names, alias_freq) if all_names else 'Unknown'
 
         tokens = list(signals.name_tokens)
         # Also add username tokens
@@ -1795,12 +2028,15 @@ class EntityResolver:
             'entity_id': entity_id,
             'canonical_name': canonical,
             'aliases': aliases,
+            'alias_freq': alias_freq,
             'usernames': list(signals.usernames),
             'phones': list(signals.phones),
             'emails': list(signals.emails),
             'avatars': list(signals.avatars),
             'name_tokens': tokens,
             'phonetic_keys': signals.phonetic_keys,
+            'observation_count': 1,
+            'confidence': 0.0,
             'sources': [{
                 'organ_id': organ_id,
                 'class_name': class_name,
@@ -1816,6 +2052,10 @@ class EntityResolver:
         entity_id = uuid.uuid4().hex[:16]
         entity = self._build_entity_dict(entity_id, signals,
                                           organ_id, class_name, item_idx)
+
+        # Compute initial confidence
+        entity['confidence'] = self._compute_confidence(entity)
+
         await self.memory.create_entity(entity)
         return entity_id
 
@@ -1823,7 +2063,8 @@ class EntityResolver:
                                  signals: IdentitySignals,
                                  organ_id: str, class_name: str,
                                  item_idx: int):
-        """Merge new signals into an existing entity node."""
+        """Merge new signals into an existing entity node.
+        Increments observation count and alias frequencies."""
         source = {
             'organ_id': organ_id,
             'class_name': class_name,
@@ -1841,6 +2082,14 @@ class EntityResolver:
             new_name_tokens=list(signals.name_tokens),
             new_phonetic_keys=signals.phonetic_keys,
         )
+        # Increment observation count
+        await self.memory.increment_observation_count(entity_id, 1)
+        # Update alias frequencies
+        alias_freq_delta = {}
+        for name in signals.names:
+            alias_freq_delta[name] = alias_freq_delta.get(name, 0) + 1
+        if alias_freq_delta:
+            await self.memory.merge_alias_frequencies(entity_id, alias_freq_delta)
 
     def _update_entity_in_list(self, entities: list[dict],
                                entity_id: str,
@@ -1853,6 +2102,15 @@ class EntityResolver:
                 existing_aliases = set(ent.get('aliases', []))
                 existing_aliases.update(signals.names)
                 ent['aliases'] = list(existing_aliases)
+
+                # Update alias frequencies
+                alias_freq = ent.get('alias_freq', {})
+                for name in signals.names:
+                    alias_freq[name] = alias_freq.get(name, 0) + 1
+                ent['alias_freq'] = alias_freq
+
+                # Increment observation count
+                ent['observation_count'] = ent.get('observation_count', 1) + 1
 
                 # Merge usernames
                 existing_u = set(ent.get('usernames', []))
@@ -1881,8 +2139,13 @@ class EntityResolver:
                     existing.update(new_vals)
                     ent[field_name] = list(existing)
 
-                # Update canonical name
+                # Re-elect canonical name with frequency data
                 all_names = ent['aliases'] + ent.get('usernames', [])
-                ent['canonical_name'] = choose_canonical_name(all_names)
+                ent['canonical_name'] = choose_canonical_name(
+                    all_names, alias_freq
+                )
+
+                # Recompute confidence
+                ent['confidence'] = self._compute_confidence(ent)
 
                 break
