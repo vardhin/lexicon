@@ -18,6 +18,8 @@
   <a href="#status">Status</a> •
   <a href="#getting-started">Getting Started</a> •
   <a href="#adding-extensions">Adding Extensions</a> •
+  <a href="#widget-conventions">Widget Conventions</a> •
+  <a href="#entity-resolution">Entity Resolution</a> •
   <a href="#roadmap">Roadmap</a>
 </p>
 
@@ -118,15 +120,17 @@ User types "organs"   →  OrganManagerWidget spawns on canvas
 | **Svelte frontend (Layer 0)** | ✅ Complete | SPA with static adapter, frost-glass overlay, Synapse Bar with command history (↑↓), feedback toasts, connection status dot, `lx-*` CSS anchor classes for theming. |
 | **Paged workspace (Layer 0)** | ✅ Complete | Vertically scrolling canvas divided into pages by thin divider lines. Sidebar with page numbers for smooth scroll navigation. Auto-expands as content grows. Widgets freely span across dividers. |
 | **Widget system (Layer 0)** | ✅ Complete | Dynamic render list driven by WebSocket. Absolute positioning at `(x, y, w, h)`. Glass-blur frames, pop-in animation, per-widget dismiss. Pointer-based dragging via handle strip. Corner resize handle. All positions/sizes persist to Memory. |
-| **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` → Svelte component. 11 widgets: clock, timer, date, note, calculator, sysmon, weather, help, terminal, organmanager, dataview. |
+| **Widget registry (Layer 0)** | ✅ Complete | `src/lib/widgets/index.js` — maps `widget_type` → Svelte component. 12 widgets: clock, timer, date, note, calculator, sysmon, weather, help, terminal, organmanager, dataview, person. |
 | **Multi-session shell (Layer 0+1)** | ✅ Complete | Full PTY shell via dedicated Shell microservice (:8765). Multiple concurrent sessions — each is a real zsh/bash PTY with colors, env persistence, interactive programs. Rendered in xterm.js TerminalWidgets on the canvas. Ctrl+C, resize, signals all work natively. Synapse Bar routes to active session or spawns new ones (Ctrl+\`, Ctrl+Tab). |
 | **Workspaces (Layer 0+3)** | ✅ Complete | Named workspaces in SurrealDB. ✦ logo → workspace menu: create, switch, delete. Each workspace has independent widgets, shell state. 🧹 clear button wipes canvas + DB. Auto-saves on switch, auto-restores on load. |
 | **WebSocket protocol (Layer 0↔1)** | ✅ Complete | Auto-reconnect with exponential backoff (2s → 30s). Message types: `RENDER_WIDGET`, `REMOVE_WIDGET`, `CLEAR_WIDGETS`, `CLEAR_SHELL`, `FEEDBACK`, `RESTORE_STATE`, `SHELL_SPAWNED`, `SHELL_OUTPUT`, `SHELL_EXITED`, `SHELL_ERROR`, `WORKSPACE_INFO`, `TOGGLE_VISIBILITY`, `ORGAN_STATUS`, `ORGAN_LIST`, `APPLY_THEME`, `THEME_LIST`, `THEME_INFO`, `WHATSAPP_BATCH`, `WHATSAPP_CHATS`, `WHATSAPP_MESSAGES`. |
-| **FastAPI Brain (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. Organ CRUD: `POST/GET/DELETE /organs`, `/organs/:id/launch`, `/organs/:id/kill`, `/organs/:id/match`, `/organs/:id/scrape`, `/organs/:id/rescrape`, `/organs/:id/data`. Connection manager with broadcast. CORS enabled. Workspace CRUD + theme CRUD over WebSocket. |
-| **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline. 12 extensions loaded. Fallback feedback for unknown commands. Help entries auto-collected. |
+| **FastAPI Brain (Layer 1)** | ✅ Complete | WebSocket at `/ws`, health at `/health`, toggle at `POST /toggle`, system stats at `/system`. Organ CRUD: `POST/GET/DELETE /organs`, `/organs/:id/launch`, `/organs/:id/kill`, `/organs/:id/match`, `/organs/:id/scrape`, `/organs/:id/rescrape`, `/organs/:id/data`. Entity endpoints: `GET /entities`, `GET /entities/:id`, `GET /entities/search/:q`, `POST /entities/resolve`, `DELETE /entities`, `GET /entities/stats/summary`. Connection manager with broadcast. CORS enabled. Workspace CRUD + theme CRUD over WebSocket. |
+| **Grammar engine (Layer 1)** | ✅ Complete | Dynamically loads every `.py` from `extensions/`, runs `match()` → `action()` pipeline. 13 extensions loaded. Fallback feedback for unknown commands. Help entries auto-collected. |
 | **Shell microservice (Layer 1+)** | ✅ Complete | Standalone Python PTY server on `:8765`. Auto-detects user's default shell. Real PTY with `TIOCSWINSZ` resize, `SIGHUP`/`SIGINT`/`SIGTSTP` signals. Raw byte streaming. Multiple concurrent sessions. |
 | **Organ system (Layer 0+)** | ✅ Complete | **Generic organ framework** — any URL can be an organ. Single headed Playwright Chromium browser (off-screen, persistent cookies). Organs are tabs. **Deep structural scraping**: paste outer HTML → tree parser discovers fields → CSS selector extraction → structured objects per match. 3-stage pipeline: similarity → structural validation → deduplication. OrganManagerWidget for CRUD. DataViewWidget for recursive layout rendering. |
 | **WhatsApp organ** | ✅ Complete | `web.whatsapp.com` as a Playwright ghost tab. Brain scrapes DOM (sidebar contacts + messages), stores in Memory, broadcasts over WebSocket. WhatsAppWidget shows chat list, message view, organ status, launch/kill controls. Stays logged in across restarts (persistent browser data). |
+| **Entity resolver (Layer 1+3)** | ✅ Complete | **Multi-strategy consensus identity resolution** — zero external dependencies. Scraped data from any organ is automatically resolved into person-entity nodes. 5 voting strategies: fingerprint (phone/email exact), name similarity (Jaro-Winkler + Soundex + Double Metaphone), username correlation (cross-platform handle matching), token overlap (IDF-weighted + substring containment), contextual (avatar URL + phone digit matching). Only applicable strategies vote — absent signals don't dilute strong matches. Entities stored in SurrealDB with full source provenance. 76 tests. |
+| **Person widget (Layer 0)** | ✅ Complete | PersonWidget — searchable grid of all resolved people, click-to-expand detail profiles with avatar, name, aliases, handles, contact info, source provenance. Built entirely from DataView meta node primitives. Full `lx-person-*` theme anchors. Search via `"people"`, `"person Rishi"`, `"who is Mehta"`, `"contacts"`. |
 | **Theming (Layer 0+3)** | ✅ Complete | Full theme system with CSS injection. 4 built-in themes: `cyberpunk`, `midnight`, `rose-pine`, `ember`. Themes stored in SurrealDB Memory, auto-seeded from `themes/*.css` on boot. Apply via natural language (`"theme cyberpunk"`), WebSocket messages, or Spine channel (`lexicon/theme`). Active theme persists across restarts and broadcasts to all connected clients. Every UI element has `lx-*` anchor classes for granular styling. Reset to default with `"reset theme"`. |
 | **SurrealDB Memory (Layer 3)** | ✅ Complete | Embedded file-backed SurrealDB (`surrealkv://`). Persists: UI state (widgets), command history, shell sessions, named workspaces, organ registrations, scrape patterns, scraped data, themes, active theme. All widget/shell data is workspace-scoped. Auto-restores on reconnect. No external server needed. |
 | **ZeroMQ Spine (Layer 2)** | ✅ Complete | PUSH/PULL on `:5557` + PUB on `:5556`. Channels: `lexicon/toggle` (show/hide), `lexicon/theme` (apply theme by name). External scripts PUSH commands → Brain dispatches → WebSocket broadcast. HTTP fallback at `POST /toggle`. |
@@ -148,6 +152,7 @@ User types "organs"   →  OrganManagerWidget spawns on canvas
 | **organ** | `organs`, `scrape`, `organ manager` | Opens the Organ Manager widget |
 | **view** | `view github`, `dashboard`, `show data` | Data view — renders scraped organ data |
 | **theme** | `theme cyberpunk`, `themes`, `reset theme` | Apply, list, or reset visual themes |
+| **person** | `people`, `person Rishi`, `who is Mehta`, `contacts` | Person dashboard — resolved entity identity graph |
 
 ### 🔲 Not Yet Implemented
 
@@ -325,6 +330,240 @@ Extensions can also return custom action types (not just `RENDER_WIDGET`) — th
 
 ---
 
+## Widget Conventions
+
+Every widget in LSD follows a strict set of conventions so that theming, layout, and composability work uniformly across the system.
+
+### Required exports
+
+Every widget Svelte component must export exactly two props:
+
+```svelte
+<script>
+  export let props = {};      // Data/config from the backend (RENDER_WIDGET.props)
+  export let onDismiss = () => {};  // Called when the user clicks the ✕ dismiss button
+</script>
+```
+
+### Root element structure
+
+The outermost `<div>` must:
+
+1. Have a **widget-specific CSS class**: e.g., `clock-widget`, `person-widget`
+2. Have a **`lx-*` theme anchor class**: e.g., `lx-clock`, `lx-person`, `lx-widget`
+3. Fill its container: `width: 100%; height: 100%;`
+4. Include a **dismiss button** with class `dismiss lx-dismiss`
+
+```svelte
+<div class="my-widget lx-mywidget lx-widget">
+  <button class="dismiss lx-dismiss" on:click={onDismiss}>✕</button>
+  <!-- widget content -->
+</div>
+```
+
+### Theme anchor classes (`lx-*`)
+
+Every significant element should have an `lx-*` class so themes can target it. The convention:
+
+| Scope | Class Pattern | Example |
+|-------|--------------|---------|
+| Widget root | `lx-{widget}` | `lx-clock`, `lx-person`, `lx-sysmon` |
+| Generic widget | `lx-widget` | All widgets |
+| Dismiss button | `lx-dismiss` | `✕` close button |
+| Label/header | `lx-label` | `"CLOCK"`, `"SYSTEM"` section labels |
+| Input fields | `lx-input` | Search bars, text inputs |
+| Sub-elements | `lx-{widget}-{part}` | `lx-person-header`, `lx-clock-time`, `lx-person-card` |
+
+Themes target these via CSS:
+```css
+/* themes/cyberpunk.css */
+.lx-person-card { border-color: rgba(0, 255, 65, 0.2); }
+.lx-person-name { color: #00ff41; }
+.lx-dismiss:hover { color: #ff0040; }
+```
+
+### Composing from DataView meta nodes
+
+For widgets that display structured data (like PersonWidget, DataViewWidget), **build a layout tree** from the DataView meta node primitives rather than writing raw HTML. This ensures consistent styling and automatic theme support.
+
+Available node types:
+
+| Node | Purpose | Key Props |
+|------|---------|-----------|
+| `card` | Glass container with optional title/icon | `variant` (`subtle`, `outline`, `ghost`), `padding` (`sm`, `lg`, `none`) |
+| `stack` | Vertical flex container | `gap` |
+| `row` | Horizontal flex container | `gap`, `align`, `justify`, `wrap` |
+| `grid` | CSS grid | `cols`, `gap` |
+| `text` | Text node | `value`, `variant` (`h1`, `h2`, `h3`, `body`, `caption`, `mono`, `label`) |
+| `badge` | Colored pill tag | `value`, `color` (`green`, `red`, `blue`, `purple`, `cyan`, `yellow`, `dim`) |
+| `avatar` | Circle image or initials | `imgUrl`, `initials`, `color`, `size` (`sm`, `lg`) |
+| `stat` | Big number + label (KPI) | `value`, `label`, `color` |
+| `bar` | Progress bar | `label`, `percent`, `color` |
+| `pair` | Key: value line | `key`, `value` |
+| `list` | Bullet/numbered list | `items[]`, `ordered`, `more` |
+| `divider` | Thin separator | — |
+| `spacer` | Empty vertical space | `size` |
+| `image` | Placeholder image box | `alt`, `ratio` |
+
+Every node can have a `style` prop for inline overrides and `children[]` for nesting.
+
+To render a layout tree, use DataViewWidget in node mode:
+
+```svelte
+<script>
+  import DataViewWidget from './DataViewWidget.svelte';
+
+  let layout = {
+    type: 'card', title: 'Contact', icon: '👤',
+    children: [
+      { type: 'row', gap: 8, align: 'center', children: [
+        { type: 'avatar', imgUrl: 'https://...', size: 'lg' },
+        { type: 'stack', gap: 2, children: [
+          { type: 'text', value: 'Rishi Mehta', variant: 'h1' },
+          { type: 'badge', value: 'cross-linked', color: 'purple' },
+        ]},
+      ]},
+      { type: 'divider' },
+      { type: 'pair', key: '📞 Phone', value: '+91-9876543210' },
+      { type: 'pair', key: '📧 Email', value: 'rishi@example.com' },
+    ],
+  };
+</script>
+
+<!-- Render the tree through DataViewWidget's recursive renderer -->
+<DataViewWidget props={{ __node: layout }} onDismiss={() => {}} />
+```
+
+### Styling conventions
+
+```css
+/* Standard glass widget styling */
+.my-widget {
+  position: relative; width: 100%; height: 100%;
+  display: flex; flex-direction: column;
+  color: rgba(255,255,255,0.92);
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif; /* or JetBrains Mono for monospace widgets */
+  padding: 10px 14px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* Standard dismiss button */
+.dismiss {
+  position: absolute; top: 6px; right: 10px;
+  background: none; border: none;
+  color: rgba(255,255,255,0.3); font-size: 14px;
+  cursor: pointer; z-index: 10;
+  padding: 2px 6px; border-radius: 4px;
+}
+.dismiss:hover { color: #ff5f57; background: rgba(255,95,87,0.12); }
+
+/* Standard section label */
+.label {
+  font-size: 10px; letter-spacing: 3px;
+  font-weight: 600; text-transform: uppercase;
+}
+
+/* Scrollable body */
+.body {
+  flex: 1; overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.1) transparent;
+}
+```
+
+### Backend → Frontend contract
+
+The backend `action()` returns a `RENDER_WIDGET` message:
+
+```python
+{
+    "type": "RENDER_WIDGET",
+    "widget_id": "unique-id",           # Unique ID — reuse to update in place
+    "widget_type": "mywidget",          # Must match registry key in index.js
+    "x": 100, "y": 100,                # Canvas position (absolute, pixels)
+    "w": 400, "h": 300,                # Widget dimensions
+    "props": { ... },                   # Passed to the Svelte component as `props`
+}
+```
+
+The widget receives `props` and can use them to fetch data, set initial state, or configure behavior. Widgets that need live data should fetch from the Brain's REST endpoints (e.g., `GET /entities`, `GET /organs/:id/data`).
+
+### Fetching from the Brain
+
+```svelte
+<script>
+  const BRAIN = 'http://127.0.0.1:8000';
+
+  async function fetchData() {
+    const r = await fetch(BRAIN + '/my-endpoint');
+    const json = await r.json();
+    // ...
+  }
+</script>
+```
+
+### Checklist for new widgets
+
+- [ ] Backend extension in `extensions/` with `match()`, `action()`, `EXTENSION` dict, and `help` entry
+- [ ] Frontend widget in `src/lib/widgets/` with `export let props` + `export let onDismiss`
+- [ ] Root element has widget-specific class + `lx-*` theme anchor(s)
+- [ ] Dismiss button with `lx-dismiss`
+- [ ] Registered in `src/lib/widgets/index.js`
+- [ ] Complex data layouts use DataView meta node primitives (not raw HTML)
+- [ ] All interactive elements have `lx-*` classes for theme injection
+- [ ] Widget fills container (`width: 100%; height: 100%`)
+- [ ] Scrollable content areas use `scrollbar-width: thin`
+
+---
+
+## Entity Resolution
+
+LSD includes a built-in **identity resolution engine** that automatically merges scraped data from different organs (WhatsApp, GitHub, etc.) into unified person nodes.
+
+### How it works
+
+When you scrape data from an organ, the Brain's entity resolver automatically:
+
+1. **Extracts identity signals** from each scraped item — names, usernames, phone numbers, emails, avatar URLs
+2. **Compares signals** against all existing entity nodes using 5 independent voting strategies
+3. **Merges or creates** — if the consensus score exceeds the threshold, the item is merged into an existing entity; otherwise a new entity is created
+
+### The 5 voting strategies
+
+| Strategy | Weight | What it matches | Example |
+|----------|--------|-----------------|---------|
+| **Fingerprint** | 5.0 | Exact phone/email match (deterministic) | `+91-9876543210` = `+91 9876 543210` → auto-merge |
+| **Name Similarity** | 2.5 | Jaro-Winkler + Soundex + Double Metaphone | `"Rishi Metha"` ~ `"Rishi Mehta"` → 0.95 |
+| **Username Match** | 2.0 | Cross-platform handle correlation | `rishimehta04` ~ `rishi_mehta` → 0.90 |
+| **Token Overlap** | 1.5 | IDF-weighted Jaccard + substring containment | `"rishimehta"` contains `{"rishi", "mehta"}` |
+| **Contextual** | 4.5 | Same avatar URL, phone digit patterns | Shared avatar → 0.85 |
+
+The **consensus engine** only averages strategies that are *applicable* — if neither side has a phone number, the fingerprint strategy is excluded rather than dragging the score to zero. This prevents absent data from diluting strong matches.
+
+### API endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/entities` | GET | List all resolved entity nodes with stats |
+| `/entities/{id}` | GET | Get a single entity with full detail |
+| `/entities/search/{query}` | GET | Search entities by name/alias |
+| `/entities/resolve` | POST | Re-resolve all entities from scratch |
+| `/entities` | DELETE | Clear all entity nodes |
+| `/entities/stats/summary` | GET | Entity count and cross-link statistics |
+
+### Natural language commands
+
+```
+people              ← show all resolved person nodes
+person Rishi        ← search for a specific person
+who is Mehta        ← search by name
+contacts            ← alias for people
+entities            ← alias for people
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -341,6 +580,7 @@ lexicon/
 │   ├── help.py                     #   Help guide (auto-collects from all extensions)
 │   ├── note.py                     #   Sticky notes
 │   ├── organ.py                    #   Organ Manager widget trigger
+│   ├── person.py                   #   Person dashboard — entity identity graph
 │   ├── sysmon.py                   #   System monitor widget
 │   ├── theme.py                    #   Theme apply / list / reset
 │   ├── timer.py                    #   Countdown timer widget
@@ -359,6 +599,7 @@ lexicon/
 │   └── src/
 │       ├── main.py                 #   FastAPI + WebSocket + organ endpoints + theme handlers
 │       ├── engine.py               #   Grammar engine (auto-loads extensions/)
+│       ├── entity_resolver.py      #   Multi-strategy consensus identity resolution engine
 │       ├── memory.py               #   SurrealDB embedded memory (Layer 3)
 │       ├── spine.py                #   ZeroMQ PUSH/PULL + PUB event bus (Layer 2)
 │       ├── shell.py                #   Shell session manager (relays to Shell microservice)
@@ -378,7 +619,7 @@ lexicon/
 │   │   └── lib/
 │   │       ├── ws.js               #   WebSocket client (auto-reconnect)
 │   │       └── widgets/
-│   │           ├── index.js            # Widget registry (11 widgets)
+│   │           ├── index.js            # Widget registry (12 widgets)
 │   │           ├── ClockWidget.svelte
 │   │           ├── TimerWidget.svelte
 │   │           ├── DateWidget.svelte
@@ -390,6 +631,7 @@ lexicon/
 │   │           ├── TerminalWidget.svelte     # xterm.js PTY terminal
 │   │           ├── OrganManagerWidget.svelte  # Organ CRUD + pattern scraper
 │   │           ├── DataViewWidget.svelte      # Recursive data layout renderer
+│   │           ├── PersonWidget.svelte        # Person/entity dashboard
 │   │           └── WhatsAppWidget.svelte      # WhatsApp chat dashboard
 │   └── src-tauri/
 │       ├── tauri.conf.json         #   Tauri config (transparent, borderless, always-on-top)
@@ -409,7 +651,7 @@ lexicon/
 ## Roadmap
 
 - [x] **SurrealDB Memory** — persist UI state, command history, auto-restore on launch
-- [x] **Extensions** — clock, timer, date, weather, notes, calculator, system monitor, help, clear, organ manager, data view, theme
+- [x] **Extensions** — clock, timer, date, weather, notes, calculator, system monitor, help, clear, organ manager, data view, theme, person
 - [x] **Widget dragging + resizing** — pointer-based repositioning, corner resize, persisted
 - [x] **Paged workspace** — scrollable multi-page canvas with sidebar navigation
 - [x] **Multi-session shell** — real PTY sessions via Shell microservice, xterm.js rendering, multiple terminals
@@ -418,6 +660,7 @@ lexicon/
 - [x] **Generic organ system** — any URL as a Playwright ghost browser tab, deep structural HTML scraping, pattern matching, field extraction
 - [x] **WhatsApp organ** — persistent ghost tab, DOM scraping, chat dashboard widget
 - [x] **Theming** — 4 built-in themes, SurrealDB persistence, `lx-*` CSS anchors, Spine channel, natural language control
+- [x] **Entity resolver** — multi-strategy consensus identity resolution, auto-resolves scraped data into person nodes, PersonWidget dashboard
 - [ ] **More Organs** — Discord, Gmail, etc.
 - [ ] **CLI event tool** — `lexicon push "reminder text"` from terminal via Spine
 - [ ] **SysMon daemon** — push system metrics on schedule via Spine

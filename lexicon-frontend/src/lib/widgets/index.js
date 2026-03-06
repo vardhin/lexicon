@@ -19,6 +19,7 @@ import HelpWidget from './HelpWidget.svelte';
 import TerminalWidget from './TerminalWidget.svelte';
 import OrganManagerWidget from './OrganManagerWidget.svelte';
 import DataViewWidget from './DataViewWidget.svelte';
+import PersonWidget from './PersonWidget.svelte';
 
 const registry = {
   clock: ClockWidget,
@@ -32,6 +33,7 @@ const registry = {
   terminal: TerminalWidget,
   organmanager: OrganManagerWidget,
   dataview: DataViewWidget,
+  person: PersonWidget,
 };
 
 export default registry;

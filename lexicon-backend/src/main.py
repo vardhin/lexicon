@@ -14,12 +14,14 @@ from src.memory import Memory
 from src.shell import ShellManager
 from src.spine import Spine
 from src.organ_manager import OrganManager
+from src.entity_resolver import EntityResolver
 
 manager = ConnectionManager()
 engine = GrammarEngine()
 memory = Memory()
 spine = Spine()
 organs = OrganManager()
+resolver = EntityResolver(memory)
 
 
 @asynccontextmanager
@@ -318,12 +320,16 @@ async def organ_scrape_pattern(organ_id: str, request: Request):
     # Store the scraped values in Memory (now can be objects OR strings)
     await memory.store_scraped_data(organ_id, class_name, values)
 
+    # Auto-resolve entities from the scraped data
+    entity_stats = await resolver.resolve(organ_id, class_name, values)
+
     return {
         "class_name": class_name,
         "count": len(values),
         "fields": result.get("fields", []),
         "values": values,
         "fingerprint": result.get("fingerprint", {}),
+        "entity_resolution": entity_stats,
     }
 
 
@@ -363,7 +369,10 @@ async def organ_rescrape(organ_id: str, request: Request):
                     values.append(t)
 
         await memory.store_scraped_data(organ_id, cname, values)
-        results[cname] = {"count": len(values), "values": values}
+        # Resolve entities from rescrape
+        entity_stats = await resolver.resolve(organ_id, cname, values)
+        results[cname] = {"count": len(values), "values": values,
+                          "entity_resolution": entity_stats}
 
     return {"results": results}
 
@@ -404,6 +413,92 @@ async def all_organs_data():
             item["organ_name"] = organ.get("name") or oid
             result.append(item)
     return {"data": result}
+
+
+# ── Entity Resolution endpoints ──────────────────────────────
+
+@app.get("/entities")
+async def list_entities():
+    """List all resolved entity nodes (person nodes)."""
+    entities = await memory.list_entities()
+    stats = await memory.get_entity_stats()
+    return {"entities": entities, "stats": stats}
+
+
+@app.get("/entities/{entity_id}")
+async def get_entity(entity_id: str):
+    """Get a single entity with all its data and sources."""
+    entity = await memory.get_entity(entity_id)
+    if not entity:
+        return {"error": "entity not found"}
+    return {"entity": entity}
+
+
+@app.get("/entities/search/{query}")
+async def search_entities(query: str):
+    """Search entities by name, alias, username, or token."""
+    results = await memory.search_entities(query)
+    return {"results": results, "count": len(results)}
+
+
+@app.post("/entities/resolve")
+async def resolve_all_entities():
+    """Re-resolve ALL scraped data across ALL organs from scratch.
+    Clears existing entities and rebuilds the knowledge graph."""
+    stats = await resolver.resolve_all_sources()
+    return {"status": "ok", "stats": stats}
+
+
+@app.post("/entities/resolve/{organ_id}")
+async def resolve_organ_entities(organ_id: str):
+    """Resolve entities from a specific organ's scraped data."""
+    data = await memory.get_scraped_data(organ_id)
+    total_stats = {"created": 0, "merged": 0, "skipped": 0}
+    for dataset in data:
+        cname = dataset.get("class_name", "")
+        values = dataset.get("values", [])
+        if not values:
+            continue
+        stats = await resolver.resolve(organ_id, cname, values)
+        total_stats["created"] += stats["created"]
+        total_stats["merged"] += stats["merged"]
+        total_stats["skipped"] += stats["skipped"]
+    return {"status": "ok", "stats": total_stats}
+
+
+@app.delete("/entities/{entity_id}")
+async def delete_entity(entity_id: str):
+    """Delete an entity node."""
+    await memory.delete_entity(entity_id)
+    return {"status": "ok"}
+
+
+@app.delete("/entities")
+async def clear_all_entities():
+    """Delete all entity nodes."""
+    await memory.clear_entities()
+    return {"status": "ok"}
+
+
+@app.get("/entities/stats/summary")
+async def entity_stats():
+    """Get entity graph statistics."""
+    stats = await memory.get_entity_stats()
+    entities = await memory.list_entities()
+    # Add source distribution
+    source_counts = {}
+    for e in entities:
+        for src in e.get("sources", []):
+            oid = src.get("organ_id", "unknown")
+            source_counts[oid] = source_counts.get(oid, 0) + 1
+    stats["source_distribution"] = source_counts
+    stats["total_aliases"] = sum(
+        len(e.get("aliases", [])) for e in entities
+    )
+    stats["total_usernames"] = sum(
+        len(e.get("usernames", [])) for e in entities
+    )
+    return stats
 
 
 @app.websocket("/ws")

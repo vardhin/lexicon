@@ -459,3 +459,189 @@ class Memory:
                 "CREATE active_theme SET name = $name",
                 {"name": name},
             )
+
+    # ── Entity Resolution (Person Nodes) ──────────────────
+
+    async def create_entity(self, entity: dict):
+        """Create a new entity node."""
+        if not self.db:
+            return
+        await self.db.query(
+            "CREATE entity SET "
+            "entity_id = $eid, canonical_name = $cname, "
+            "aliases = $aliases, usernames = $usernames, "
+            "phones = $phones, emails = $emails, avatars = $avatars, "
+            "sources = $sources, name_tokens = $tokens, "
+            "phonetic_keys = $pkeys, "
+            "created_at = time::now(), updated_at = time::now()",
+            {
+                "eid": entity["entity_id"],
+                "cname": entity.get("canonical_name", "Unknown"),
+                "aliases": entity.get("aliases", []),
+                "usernames": entity.get("usernames", []),
+                "phones": entity.get("phones", []),
+                "emails": entity.get("emails", []),
+                "avatars": entity.get("avatars", []),
+                "sources": entity.get("sources", []),
+                "tokens": entity.get("name_tokens", []),
+                "pkeys": entity.get("phonetic_keys", []),
+            },
+        )
+
+    async def merge_entity(self, entity_id: str, new_names: list = None,
+                           new_usernames: list = None, new_phones: list = None,
+                           new_emails: list = None, new_avatars: list = None,
+                           new_source: dict = None, new_name_tokens: list = None,
+                           new_phonetic_keys: list = None):
+        """Merge new data into an existing entity node.
+        Uses SurrealDB array operations to append without duplicates."""
+        if not self.db:
+            return
+
+        # Build the update query dynamically
+        set_parts = ["updated_at = time::now()"]
+        params = {"eid": entity_id}
+
+        if new_names:
+            set_parts.append("aliases = array::union(aliases, $new_names)")
+            params["new_names"] = new_names
+
+        if new_usernames:
+            set_parts.append("usernames = array::union(usernames, $new_usernames)")
+            params["new_usernames"] = new_usernames
+
+        if new_phones:
+            set_parts.append("phones = array::union(phones, $new_phones)")
+            params["new_phones"] = new_phones
+
+        if new_emails:
+            set_parts.append("emails = array::union(emails, $new_emails)")
+            params["new_emails"] = new_emails
+
+        if new_avatars:
+            set_parts.append("avatars = array::union(avatars, $new_avatars)")
+            params["new_avatars"] = new_avatars
+
+        if new_name_tokens:
+            set_parts.append("name_tokens = array::union(name_tokens, $new_tokens)")
+            params["new_tokens"] = new_name_tokens
+
+        if new_phonetic_keys:
+            set_parts.append("phonetic_keys = array::union(phonetic_keys, $new_pkeys)")
+            params["new_pkeys"] = new_phonetic_keys
+
+        if new_source:
+            set_parts.append("sources = array::append(sources, $new_source)")
+            params["new_source"] = new_source
+
+        # Update canonical name based on all aliases
+        if new_names:
+            set_parts.append(
+                "canonical_name = $new_canonical"
+            )
+
+        set_clause = ", ".join(set_parts)
+        query = f"UPDATE entity SET {set_clause} WHERE entity_id = $eid"
+
+        # If we need to recompute canonical name, first get current aliases
+        if new_names:
+            current = await self.db.query(
+                "SELECT aliases, usernames FROM entity WHERE entity_id = $eid",
+                {"eid": entity_id},
+            )
+            if current and len(current) > 0:
+                from src.entity_resolver import choose_canonical_name
+                all_aliases = list(set(
+                    current[0].get("aliases", []) + new_names
+                ))
+                all_names = all_aliases + list(set(
+                    current[0].get("usernames", []) + (new_usernames or [])
+                ))
+                params["new_canonical"] = choose_canonical_name(all_names)
+            else:
+                params["new_canonical"] = new_names[0] if new_names else "Unknown"
+
+        await self.db.query(query, params)
+
+    async def list_entities(self, limit: int = 1000) -> list:
+        """Get all entity nodes."""
+        if not self.db:
+            return []
+        result = await self.db.query(
+            "SELECT entity_id, canonical_name, aliases, usernames, "
+            "phones, emails, avatars, sources, name_tokens, phonetic_keys, "
+            "created_at, updated_at "
+            "FROM entity ORDER BY updated_at DESC LIMIT $limit",
+            {"limit": limit},
+        )
+        if not result:
+            return []
+        return _sanitize_for_json(result)
+
+    async def get_entity(self, entity_id: str) -> dict | None:
+        """Get a single entity by ID."""
+        if not self.db:
+            return None
+        result = await self.db.query(
+            "SELECT * FROM entity WHERE entity_id = $eid",
+            {"eid": entity_id},
+        )
+        if result and len(result) > 0:
+            return _sanitize_for_json(result[0])
+        return None
+
+    async def search_entities(self, query: str) -> list:
+        """Search entities by name, alias, username, or token."""
+        if not self.db:
+            return []
+        q_lower = query.lower().strip()
+        # Search across canonical name, aliases, usernames, and tokens
+        result = await self.db.query(
+            "SELECT entity_id, canonical_name, aliases, usernames, "
+            "phones, emails, avatars, created_at, updated_at "
+            "FROM entity WHERE "
+            "string::lowercase(canonical_name) CONTAINS $q OR "
+            "$q INSIDE aliases OR "
+            "$q INSIDE usernames OR "
+            "$q INSIDE name_tokens "
+            "ORDER BY updated_at DESC LIMIT 50",
+            {"q": q_lower},
+        )
+        if not result:
+            return []
+        return _sanitize_for_json(result)
+
+    async def delete_entity(self, entity_id: str):
+        """Delete an entity node."""
+        if not self.db:
+            return
+        await self.db.query(
+            "DELETE entity WHERE entity_id = $eid",
+            {"eid": entity_id},
+        )
+
+    async def clear_entities(self):
+        """Delete all entity nodes (for full re-resolution)."""
+        if not self.db:
+            return
+        await self.db.query("DELETE entity")
+
+    async def get_entity_stats(self) -> dict:
+        """Get stats about the entity graph."""
+        if not self.db:
+            return {"total": 0, "multi_source": 0}
+        result = await self.db.query(
+            "SELECT count() as total FROM entity GROUP ALL"
+        )
+        total = result[0]["total"] if result else 0
+
+        multi = await self.db.query(
+            "SELECT count() as c FROM entity "
+            "WHERE array::len(sources) > 1 GROUP ALL"
+        )
+        multi_count = multi[0]["c"] if multi else 0
+
+        return {
+            "total_entities": total,
+            "multi_source_entities": multi_count,
+        }
